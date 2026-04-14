@@ -1,0 +1,35 @@
+# Local agent instructions
+AGENTS.md
+
+# macOS / editor files
+.DS_Store
+.vscode/
+.idea/
+
+# Python / notebooks
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# MATLAB / generated artifacts
+*.asv
+*.fig
+*.m~
+
+# Local documents and large binary inputs
+*.pdf
+*.pptx
+*.mat
+*.jpg
+*.jpeg
+*.png
+
+# Keep text map descriptions
+!3credits_practice/
+!3credits_practice/*.txt
+
+# Local outputs and scratch files
+tmp/
+temp/
+scratch/
+notes/
