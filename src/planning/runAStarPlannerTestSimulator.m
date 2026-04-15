@@ -57,19 +57,19 @@ if ~isfield(opts, 'sensorOrigin')
     opts.sensorOrigin = [0.13; 0];
 end
 if ~isfield(opts, 'numParticles')
-    opts.numParticles = 250;
+    opts.numParticles = 500;
 end
 if ~isfield(opts, 'processNoise')
-    opts.processNoise = diag([0.01, 0.01, 0.008]);
+    opts.processNoise = diag([0.004, 0.004, 0.003]);
 end
 if ~isfield(opts, 'measurementNoise')
-    opts.measurementNoise = 0.05 * eye(10);
+    opts.measurementNoise = 0.08 * eye(10);
 end
 if ~isfield(opts, 'beaconSigma')
-    opts.beaconSigma = 0.10;
+    opts.beaconSigma = 0.05;
 end
 if ~isfield(opts, 'beaconWeightFactor')
-    opts.beaconWeightFactor = 3.0;
+    opts.beaconWeightFactor = 6.0;
 end
 if ~isfield(opts, 'beaconSensorOrigin')
     opts.beaconSensorOrigin = [0; 0];
