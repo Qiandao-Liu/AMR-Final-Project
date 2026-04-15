@@ -38,7 +38,7 @@ if ~isfield(opts, 'epsilon')
     opts.epsilon = 0.15;
 end
 if ~isfield(opts, 'desiredSpeed')
-    opts.desiredSpeed = 0.18;
+    opts.desiredSpeed = 0.30;
 end
 if ~isfield(opts, 'maxTime')
     opts.maxTime = 45;
@@ -50,7 +50,7 @@ if ~isfield(opts, 'wheel2Center')
     opts.wheel2Center = 0.13;
 end
 if ~isfield(opts, 'maxWheelVelocity')
-    opts.maxWheelVelocity = 0.45;
+    opts.maxWheelVelocity = 0.50;
 end
 if ~isfield(opts, 'sensorOrigin')
     opts.sensorOrigin = [0.13; 0];
@@ -72,6 +72,9 @@ if ~isfield(opts, 'beaconSigma')
 end
 if ~isfield(opts, 'beaconSensorOrigin')
     opts.beaconSensorOrigin = [0; 0];
+end
+if ~isfield(opts, 'maxAngularSpeed')
+    opts.maxAngularSpeed = 1.0;
 end
 
 mapStruct = load(mapMatPath);
@@ -180,6 +183,7 @@ while toc < opts.maxTime
 
     [cmdV, cmdW] = feedbackLin(desiredVel(1), desiredVel(2), poseEst(3), opts.epsilon);
     [cmdV, cmdW] = limitCmds(cmdV, cmdW, opts.maxWheelVelocity, opts.wheel2Center);
+    cmdW = max(min(cmdW, opts.maxAngularSpeed), -opts.maxAngularSpeed);
     SetFwdVelAngVelCreate(Robot, cmdV, cmdW);
 
     if mod(iter, opts.plotEvery) == 0 && isvalid(fig)
