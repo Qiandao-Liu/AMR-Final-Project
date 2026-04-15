@@ -17,6 +17,7 @@ function [state, particlesPre] = localizeStepPF(state, odom, zDepth, map, sensor
 %                       .tags              default []
 %                       .beaconLoc         default []
 %                       .beaconSigma       default 0.20
+%                       .beaconWeightFactor default 3.0
 %                       .beaconSensorOrigin default [0; 0]
 %
 %   OUTPUTS
@@ -43,6 +44,9 @@ if ~isfield(opts, 'beaconLoc')
 end
 if ~isfield(opts, 'beaconSigma')
     opts.beaconSigma = 0.20;
+end
+if ~isfield(opts, 'beaconWeightFactor')
+    opts.beaconWeightFactor = 3.0;
 end
 if ~isfield(opts, 'beaconSensorOrigin')
     opts.beaconSensorOrigin = [0; 0];
@@ -71,7 +75,7 @@ if ~isempty(opts.tags) && ~isempty(opts.beaconLoc)
     end
 
     logDepthWeights = log(max(particlesPre.weights, realmin));
-    logCombined = logDepthWeights + logBeaconWeights;
+    logCombined = logDepthWeights + opts.beaconWeightFactor * logBeaconWeights;
     logCombined = logCombined - max(logCombined);
     combinedWeights = exp(logCombined);
 
