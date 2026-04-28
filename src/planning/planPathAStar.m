@@ -27,6 +27,16 @@ grid = buildOccupancyGrid( ...
 
 startIdx = worldToGrid(startXY, grid);
 goalIdx = worldToGrid(goalXY, grid);
+startIdx = nearestFreeGridCell(startIdx, grid.occupancy);
+goalIdx = nearestFreeGridCell(goalIdx, grid.occupancy);
+
+if isempty(startIdx) || isempty(goalIdx)
+    pathWorld = zeros(0, 2);
+    pathIdx = zeros(0, 2);
+    found = false;
+    return;
+end
+
 [pathIdx, found] = astarGrid(grid.occupancy, startIdx, goalIdx);
 
 if ~found
@@ -36,6 +46,11 @@ end
 
 pathWorld = [grid.xCenters(pathIdx(:, 2))', grid.yCenters(pathIdx(:, 1))'];
 pathWorld = simplifyPath(pathWorld, 0.15);
+pathWorld = [startXY(:)'; pathWorld];
+
+if norm(pathWorld(end, :) - goalXY(:)') > 1e-9
+    pathWorld = [pathWorld; goalXY(:)'];
+end
 end
 
 function idx = worldToGrid(pointXY, grid)
@@ -59,4 +74,39 @@ for i = 2:size(pathIn, 1) - 1
     end
 end
 pathOut = [pathOut; pathIn(end, :)];
+end
+
+function idxFree = nearestFreeGridCell(idx, occupancy)
+[ny, nx] = size(occupancy);
+row = idx(1);
+col = idx(2);
+
+if row < 1 || row > ny || col < 1 || col > nx
+    idxFree = [];
+    return;
+end
+
+if ~occupancy(row, col)
+    idxFree = idx;
+    return;
+end
+
+[cols, rows] = meshgrid(1:nx, 1:ny);
+freeMask = ~occupancy;
+if ~any(freeMask(:))
+    idxFree = [];
+    return;
+end
+
+dist2 = (rows - row).^2 + (cols - col).^2;
+dist2(~freeMask) = inf;
+[bestDist2, bestLin] = min(dist2(:));
+
+if isinf(bestDist2)
+    idxFree = [];
+    return;
+end
+
+[bestRow, bestCol] = ind2sub([ny, nx], bestLin);
+idxFree = [bestRow, bestCol];
 end
