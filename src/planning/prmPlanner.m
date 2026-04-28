@@ -61,7 +61,6 @@ function [dataStore] = prmPlanner(Robot, maxTime)
                    n_PRM, robotRadius, stayAwayPoints, @haltonSample);
     
 
-    
     % =========================================================
     % EXECUTION LOOP
     % =========================================================
@@ -97,6 +96,9 @@ function [dataStore] = prmPlanner(Robot, maxTime)
         % ---------------------------
         path = findPath(PRM, q_current, q_goal, obstacles, walls, stayAwayPoints, robotRadius);
 
+        % Set LED to GREEN before moving toward waypoint
+        SetLEDsRoomba(Robot, 3, 0, 100);
+
         % OPTIONAL PLOTTING OF PATH ALONG PRM
         % figure;
         % plotPRM(PRM, walls, sim_bound);
@@ -114,34 +116,42 @@ function [dataStore] = prmPlanner(Robot, maxTime)
         % SetLEDsRoomba(Robot, 3, 0, 100);
 
         for p = 2:size(path,1)
-            
+    
             reached = false;
-    
+        
             while ~reached && toc < maxTime
-    
+        
                 [noRobotCount,dataStore] = readStoreSensorData(Robot,noRobotCount,dataStore);
                 currentPose = dataStore.truthPose(end,:);
                 q = [currentPose(2), currentPose(3)];
-    
+        
                 dx = path(p,1) - q(1);
                 dy = path(p,2) - q(2);
-    
+        
                 dist = norm([dx dy]);
-    
+        
                 [v,w] = feedbackLin(dx,dy,currentPose(4),epsilon);
                 [v,w] = limitCmds(v,w,0.2,0.13);
-    
+        
                 SetFwdVelAngVelCreate(Robot,v,w);
-    
+        
                 if dist < closeEnough
                     reached = true;
                 end
             end
+        
+            % ONLY trigger RED if this is the FINAL waypoint
+            if p == size(path,1)
+                SetFwdVelAngVelCreate(Robot,0,0);  % stop cleanly
+                pause(1); % optional but important for visible LED change
+        
+                % Set LED to RED (arrived at waypoint)
+                SetLEDsRoomba(Robot, 3, 100, 100);
+                pause(1); % allow simulator to register
+            end
         end
 
         wayptVisited = [wayptVisited; q_goal];
-        % CHANGE LED TO RED HERE
-        % SetLEDsRoomba(Robot, 3, 100, 100);
         
         gotopt = gotopt + 1;
     end
