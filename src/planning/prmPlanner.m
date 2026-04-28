@@ -70,20 +70,27 @@ function [dataStore] = prmPlanner(Robot, maxTime)
     epsilon = 0.2;
     
     gotopt = 1;
+    numWayPt = size(waypt,1);
+    wayptVisited = [];
     
     tic
     while toc < maxTime
-    
+        
+        % Save the current state of the robot
         [noRobotCount,dataStore] = readStoreSensorData(Robot,noRobotCount,dataStore);
         currentPose = dataStore.truthPose(end,:);
         q_current = [currentPose(2), currentPose(3)];
+
     
-        if gotopt > size(waypt,1)
+        if gotopt > numWayPt
             SetFwdVelAngVelCreate(Robot,0,0);
             break;
         end
+
+        % Order waypoints based on current state
+        waypt = orderWaypoints(waypt(2:end, :), q_current);
     
-        q_goal = waypt(gotopt,:);
+        q_goal = waypt(1,:);
     
         % ---------------------------
         % PLAN PATH USING PRM
@@ -105,7 +112,7 @@ function [dataStore] = prmPlanner(Robot, maxTime)
         
         % CHANGE LED BACK TO GREEN HERE
         % SetLEDsRoomba(Robot, 3, 0, 100);
-        
+
         for p = 2:size(path,1)
             
             reached = false;
@@ -128,11 +135,13 @@ function [dataStore] = prmPlanner(Robot, maxTime)
     
                 if dist < closeEnough
                     reached = true;
-                    % CHANGE LED TO RED HERE
-                    % SetLEDsRoomba(Robot, 3, 100, 100);
                 end
             end
         end
+
+        wayptVisited = [wayptVisited; q_goal];
+        % CHANGE LED TO RED HERE
+        % SetLEDsRoomba(Robot, 3, 100, 100);
         
         gotopt = gotopt + 1;
     end
