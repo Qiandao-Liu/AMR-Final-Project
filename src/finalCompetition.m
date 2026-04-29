@@ -1,43 +1,37 @@
-function result = runPFWaypointTestSimulator(Robot, mapMatPath, opts)
-% RUNPFWAYPOINTTESTSIMULATOR Initialization + PF + A* sequential waypoint test.
+function result = finalCompetition(Robot, mapMatPath, opts)
+% FINALCOMPETITION Stable final-competition entrypoint based on the
+% proven PF waypoint simulator loop.
 %
-%   result = runPFWaypointTestSimulator(Robot)
-%   result = runPFWaypointTestSimulator(Robot, mapMatPath)
-%   result = runPFWaypointTestSimulator(Robot, mapMatPath, opts)
+%   result = finalCompetition(Robot)
+%   result = finalCompetition(Robot, mapMatPath)
+%   result = finalCompetition(Robot, mapMatPath, opts)
 %
-%   Default test on map1:
-%     robot starts near waypoint [-4.5, -3.5]
-%     targets = mapStruct.waypoints in stored order
-%
-%   The test does not use ground-truth pose for control. It first runs the
-%   initialization routine to estimate the start pose from waypoint
-%   candidates, seeds PF from that estimate, then repeatedly plans an A*
-%   path from the current PF estimate to the next waypoint and tracks the
-%   local path with feedback linearization.
+%   This version intentionally follows the control structure of
+%   runPFWaypointTestSimulator and tracks the stored waypoint list in
+%   sequence:
+%       [mapStruct.waypoints; mapStruct.ECwaypoints]
 
-baseDir = fileparts(fileparts(fileparts(mfilename('fullpath'))));
+baseDir = fileparts(fileparts(mfilename('fullpath')));
 addpath(genpath(fullfile(baseDir, 'src')));
 
 if nargin < 2 || isempty(mapMatPath)
     mapMatPath = fullfile(baseDir, '3credits_practice', 'map1_3credits.mat');
 end
-
 if nargin < 3
     opts = struct();
 end
 
+mapMatPath = localResolveMapPath(mapMatPath);
 mapStruct = load(mapMatPath);
 map = mapStruct.map;
-beaconLoc = [];
+
+beaconLoc = zeros(0, 3);
 if isfield(mapStruct, 'beaconLoc')
     beaconLoc = mapStruct.beaconLoc;
 end
 
-if ~isfield(opts, 'startPose')
-    opts.startPose = [-4.5; -3.5; 0.262];
-end
 if ~isfield(opts, 'waypoints')
-    opts.waypoints = localResolveWaypointTargets(mapStruct);
+    opts.waypoints = localResolveFinalTargets(mapStruct);
 end
 if ~isfield(opts, 'closeEnough')
     opts.closeEnough = 0.20;
@@ -111,6 +105,9 @@ end
 if ~isfield(opts, 'initScoreSigma')
     opts.initScoreSigma = 0.20;
 end
+if ~isfield(opts, 'showWindow')
+    opts.showWindow = true;
+end
 
 angles = linspace(27 * pi / 180, -27 * pi / 180, 10)';
 stayAwayPoints = zeros(0, 2);
@@ -139,23 +136,30 @@ particlesPre = [];
 result = struct();
 result.reachedAll = false;
 result.finalPoseEstimate = [nan; nan; nan];
-result.visitedWaypoints = 0;
+result.visitedWaypoints = zeros(0, 2);
+result.remainingGoals = opts.waypoints;
+result.globalVisitOrder = opts.waypoints;
 result.initResult = struct();
+result.wallBeliefs = [];
+result.replanCount = 0;
 
 iter = 0;
 currentPath = zeros(0, 2);
 pathTargetIdx = 1;
 
-fig = figure('Name', 'PF Waypoint Test', 'Color', 'w');
+fig = [];
+if opts.showWindow
+    fig = figure('Name', 'Final Competition', 'Color', 'w');
+end
 
-cleanupObj = onCleanup(@() localCleanup(Robot));
+cleanupObj = onCleanup(@() localCleanup(Robot)); %#ok<NASGU>
 
 SetFwdVelAngVelCreate(Robot, 0, 0);
 pause(0.2);
 
 if isempty(opts.waypoints)
-    error('runPFWaypointTestSimulator:NoWaypoints', ...
-        'No waypoint targets available for the waypoint test.');
+    error('finalCompetition:NoWaypoints', ...
+        'No waypoint targets available for final competition.');
 end
 
 initOpts = struct('turnRate', opts.initTurnRate, ...
@@ -182,14 +186,27 @@ AngleSensorRoomba(Robot);
 DistanceSensorRoomba(Robot);
 
 targetIdx = localInitialTargetIndex(initResult.bestPose, opts.waypoints, opts.closeEnough);
-result.visitedWaypoints = max(targetIdx - 1, 0);
+if targetIdx > 1
+    result.visitedWaypoints = opts.waypoints(1:targetIdx - 1, :);
+end
+if targetIdx <= size(opts.waypoints, 1)
+    result.remainingGoals = opts.waypoints(targetIdx:end, :);
+    result.globalVisitOrder = result.remainingGoals;
+else
+    result.remainingGoals = zeros(0, 2);
+    result.globalVisitOrder = zeros(0, 2);
+end
 
 if targetIdx > size(opts.waypoints, 1)
     result.reachedAll = true;
-    result.visitedWaypoints = size(opts.waypoints, 1);
     result.finalPoseEstimate = state.poseEstimate;
-    fprintf('Initialization pose is already within tolerance of all waypoint targets.\n');
+    fprintf('Initialization pose is already within tolerance of all final-competition targets.\n');
     return;
+end
+
+fprintf('Final competition sequential order:\n');
+for i = targetIdx:size(opts.waypoints, 1)
+    fprintf('  %d: [%.2f, %.2f]\n', i, opts.waypoints(i, 1), opts.waypoints(i, 2));
 end
 
 tic;
@@ -213,7 +230,7 @@ while toc < opts.maxTime
                'measurementNoise', opts.measurementNoise, ...
                'tags', tags, ...
                'beaconLoc', beaconLoc, ...
-                'beaconSigma', opts.beaconSigma, ...
+               'beaconSigma', opts.beaconSigma, ...
                'beaconWeightFactor', opts.beaconWeightFactor, ...
                'beaconSensorOrigin', opts.beaconSensorOrigin));
 
@@ -223,23 +240,31 @@ while toc < opts.maxTime
     dataStore.visibleTags = [dataStore.visibleTags; toc, size(tags, 1)];
 
     currentTarget = opts.waypoints(targetIdx, :);
-    delta = currentTarget(:) - poseEst(1:2);
-    distToTarget = norm(delta);
+    deltaToGoal = currentTarget(:) - poseEst(1:2);
+    distToGoal = norm(deltaToGoal);
 
-    if distToTarget <= opts.closeEnough
-        fprintf('Reached waypoint %d at [%.3f, %.3f]\n', ...
+    if distToGoal <= opts.closeEnough
+        fprintf('Reached target %d at [%.3f, %.3f]\n', ...
             targetIdx, currentTarget(1), currentTarget(2));
+        if isempty(result.visitedWaypoints)
+            result.visitedWaypoints = currentTarget;
+        else
+            result.visitedWaypoints = [result.visitedWaypoints; currentTarget];
+        end
         targetIdx = targetIdx + 1;
-        result.visitedWaypoints = targetIdx - 1;
 
         if targetIdx > size(opts.waypoints, 1)
             result.reachedAll = true;
+            result.remainingGoals = zeros(0, 2);
+            result.globalVisitOrder = zeros(0, 2);
             break;
         end
 
-        currentTarget = opts.waypoints(targetIdx, :);
         currentPath = zeros(0, 2);
         pathTargetIdx = 1;
+        result.remainingGoals = opts.waypoints(targetIdx:end, :);
+        result.globalVisitOrder = result.remainingGoals;
+        currentTarget = opts.waypoints(targetIdx, :);
     end
 
     plannerOpts = struct('resolution', opts.planResolution, ...
@@ -255,10 +280,10 @@ while toc < opts.maxTime
             dataStore.plannedPath = currentPath;
             pathTargetIdx = 1;
         elseif isempty(previousPath)
-            warning('A* failed to find an initial path from PF estimate to waypoint %d. Stopping test.', targetIdx);
+            warning('A* failed to find an initial path from PF estimate to target %d. Stopping.', targetIdx);
             break;
         else
-            warning('A* replanning failed at waypoint %d. Continuing on previous path.', targetIdx);
+            warning('A* replanning failed at target %d. Continuing on previous path.', targetIdx);
         end
     end
 
@@ -286,14 +311,15 @@ while toc < opts.maxTime
     cmdW = max(min(cmdW, opts.maxAngularSpeed), -opts.maxAngularSpeed);
     SetFwdVelAngVelCreate(Robot, cmdV, cmdW);
 
-    if mod(iter, opts.plotEvery) == 0 && isvalid(fig)
+    if mod(iter, opts.plotEvery) == 0 && ~isempty(fig) && isvalid(fig)
         localUpdatePlot(fig, map, beaconLoc, stayAwayPoints, opts.waypoints, targetIdx, ...
             currentPath, pathTargetIdx, particlesPre, dataStore);
     end
 
     if mod(iter, 10) == 0
-        fprintf('PF estimate: [x=%.3f, y=%.3f, th=%.3f], target=%d, goalDist=%.3f, pathIdx=%d, tags=%d\n', ...
-            poseEst(1), poseEst(2), poseEst(3), targetIdx, distToTarget, pathTargetIdx, size(tags, 1));
+        fprintf(['PF estimate: [x=%.3f, y=%.3f, th=%.3f], target=%d, ', ...
+                 'goalDist=%.3f, pathIdx=%d, tags=%d\n'], ...
+            poseEst(1), poseEst(2), poseEst(3), targetIdx, distToGoal, pathTargetIdx, size(tags, 1));
     end
 
     pause(opts.loopPause);
@@ -301,7 +327,7 @@ end
 
 SetFwdVelAngVelCreate(Robot, 0, 0);
 
-if isvalid(fig)
+if ~isempty(fig) && isvalid(fig)
     localUpdatePlot(fig, map, beaconLoc, stayAwayPoints, opts.waypoints, ...
         min(targetIdx, size(opts.waypoints, 1)), currentPath, pathTargetIdx, particlesPre, dataStore);
 end
@@ -309,19 +335,22 @@ end
 result.finalPoseEstimate = state.poseEstimate;
 
 if result.reachedAll
-    fprintf('Completed all %d waypoint targets.\n', size(opts.waypoints, 1));
+    fprintf('Completed all %d final-competition targets.\n', size(opts.waypoints, 1));
 else
-    fprintf('Stopped before completing all waypoints.\n');
+    fprintf('Stopped before completing all final-competition targets.\n');
 end
 fprintf('Final PF estimate: [x=%.3f, y=%.3f, th=%.3f]\n', ...
     result.finalPoseEstimate(1), result.finalPoseEstimate(2), result.finalPoseEstimate(3));
 end
 
-function waypoints = localResolveWaypointTargets(mapStruct)
+function waypoints = localResolveFinalTargets(mapStruct)
+waypoints = zeros(0, 2);
+
 if isfield(mapStruct, 'waypoints') && ~isempty(mapStruct.waypoints)
     waypoints = mapStruct.waypoints;
-else
-    waypoints = zeros(0, 2);
+end
+if isfield(mapStruct, 'ECwaypoints') && ~isempty(mapStruct.ECwaypoints)
+    waypoints = [waypoints; mapStruct.ECwaypoints];
 end
 end
 
@@ -365,7 +394,7 @@ if ~isempty(stayAwayPoints)
 end
 
 plot(ax, waypoints(:, 1), waypoints(:, 2), 'bo', 'MarkerFaceColor', 'c', 'MarkerSize', 8);
-if ~isempty(waypoints)
+if ~isempty(waypoints) && targetIdx <= size(waypoints, 1)
     plot(ax, waypoints(targetIdx, 1), waypoints(targetIdx, 2), 'rp', ...
         'MarkerFaceColor', 'r', 'MarkerSize', 14);
 end
@@ -393,7 +422,7 @@ numVisible = 0;
 if ~isempty(dataStore.visibleTags)
     numVisible = dataStore.visibleTags(end, 2);
 end
-title(ax, sprintf('Initialization + PF + A* Test (visible tags: %d)', numVisible));
+title(ax, sprintf('Final Competition PF + A* (visible tags: %d)', numVisible));
 xlabel(ax, 'x (m)');
 ylabel(ax, 'y (m)');
 drawnow limitrate;
@@ -445,4 +474,38 @@ try
 catch
     disp('Error retrieving or saving beacon data.');
 end
+end
+
+function mapMatPath = localResolveMapPath(mapMatPath)
+mapMatPath = string(mapMatPath);
+
+if endsWith(lower(mapMatPath), ".txt")
+    txtPath = mapMatPath;
+    matPath = replace(txtPath, ".txt", ".mat");
+    if isfile(matPath)
+        mapMatPath = matPath;
+        return;
+    end
+end
+
+if isfile(mapMatPath)
+    return;
+end
+
+[~, mapName, ext] = fileparts(mapMatPath);
+baseDir = fileparts(fileparts(mfilename('fullpath')));
+candidates = [
+    fullfile(baseDir, '3credits_practice', mapName + ".mat")
+    fullfile(baseDir, '3credits_practice', mapName + ext)
+];
+
+for i = 1:numel(candidates)
+    if isfile(candidates(i))
+        mapMatPath = candidates(i);
+        return;
+    end
+end
+
+error('finalCompetition:MapNotFound', ...
+    'Unable to find map file ''%s'' or a matching .mat file.', mapMatPath);
 end

@@ -27,10 +27,9 @@ maxProb = 0.99;
 numBeams = length(zDepth);
 numOptWalls = size(optWalls, 1);
 
-% 1. Predict what we SHOULD see for both Static and Optional maps
-% Use the enhanced depthPredict we wrote earlier
-[dStatic, ~] = depthPredict(robotPose, knownMap, sensorOrigin, angles, 10.0);
-[dOpt, hitIdxOpt] = depthPredict(robotPose, optWalls, sensorOrigin, angles, 10.0);
+% 1. Predict what we SHOULD see for both Static and Optional maps.
+[dStatic, ~] = depthPredictNew(robotPose, knownMap, sensorOrigin, angles, 10.0);
+[dOpt, hitIdxOpt] = depthPredictNew(robotPose, optWalls, sensorOrigin, angles, 10.0);
 
 % 2. Process each beam
 for k = 1:numBeams
