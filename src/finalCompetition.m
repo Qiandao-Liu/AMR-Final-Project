@@ -47,10 +47,16 @@ if ~isfield(opts, 'epsilon')
     opts.epsilon = 0.15;
 end
 if ~isfield(opts, 'desiredSpeed')
-    opts.desiredSpeed = 0.30;
+    opts.desiredSpeed = 0.12;
+end
+if ~isfield(opts, 'maxForwardSpeed')
+    opts.maxForwardSpeed = 0.14;
+end
+if ~isfield(opts, 'maxReverseSpeed')
+    opts.maxReverseSpeed = 0.04;
 end
 if ~isfield(opts, 'maxTime')
-    opts.maxTime = 900000;
+    opts.maxTime = 300;
 end
 if ~isfield(opts, 'loopPause')
     opts.loopPause = 0.05;
@@ -59,7 +65,7 @@ if ~isfield(opts, 'wheel2Center')
     opts.wheel2Center = 0.13;
 end
 if ~isfield(opts, 'maxWheelVelocity')
-    opts.maxWheelVelocity = 0.50;
+    opts.maxWheelVelocity = 0.25;
 end
 if ~isfield(opts, 'sensorOrigin')
     opts.sensorOrigin = [0.13; 0];
@@ -69,6 +75,21 @@ if ~isfield(opts, 'numParticles')
 end
 if ~isfield(opts, 'processNoise')
     opts.processNoise = diag([0.004, 0.004, 0.003]);
+end
+if ~isfield(opts, 'useScaledProcessNoise')
+    opts.useScaledProcessNoise = true;
+end
+if ~isfield(opts, 'processNoisePositionBase')
+    opts.processNoisePositionBase = 0.006;
+end
+if ~isfield(opts, 'processNoisePositionPerMeter')
+    opts.processNoisePositionPerMeter = 0.08;
+end
+if ~isfield(opts, 'processNoiseThetaBase')
+    opts.processNoiseThetaBase = 0.004;
+end
+if ~isfield(opts, 'processNoiseThetaPerRad')
+    opts.processNoiseThetaPerRad = 0.08;
 end
 if ~isfield(opts, 'measurementNoise')
     opts.measurementNoise = 0.08 * eye(10);
@@ -86,7 +107,7 @@ if ~isfield(opts, 'beaconSensorOrigin')
     opts.beaconSensorOrigin = [0; 0];
 end
 if ~isfield(opts, 'maxAngularSpeed')
-    opts.maxAngularSpeed = 1.0;
+    opts.maxAngularSpeed = 0.6;
 end
 if ~isfield(opts, 'lookaheadDistance')
     opts.lookaheadDistance = 0.25;
@@ -133,6 +154,24 @@ end
 if ~isfield(opts, 'maxThetaStepForControl')
     opts.maxThetaStepForControl = 0.45;
 end
+if ~isfield(opts, 'pfMaxSpreadBeforeReseed')
+    opts.pfMaxSpreadBeforeReseed = 0.45;
+end
+if ~isfield(opts, 'pfMinNeffBeforeReseed')
+    opts.pfMinNeffBeforeReseed = 20;
+end
+if ~isfield(opts, 'pfReseedOnTags')
+    opts.pfReseedOnTags = false;
+end
+if ~isfield(opts, 'pfReseedPositionSigma')
+    opts.pfReseedPositionSigma = 0.12;
+end
+if ~isfield(opts, 'pfReseedThetaSigma')
+    opts.pfReseedThetaSigma = 15 * pi / 180;
+end
+if ~isfield(opts, 'tagSnapAlpha')
+    opts.tagSnapAlpha = 0.65;
+end
 
 angles = linspace(27 * pi / 180, -27 * pi / 180, 10)';
 stayAwayPoints = zeros(0, 2);
@@ -178,7 +217,7 @@ if opts.showWindow
     fig = figure('Name', 'Final Competition', 'Color', 'w');
 end
 
-cleanupObj = onCleanup(@() localCleanup(Robot)); %#ok<NASGU>
+cleanupObj = onCleanup(@() localCleanup(Robot));
 
 SetFwdVelAngVelCreate(Robot, 0, 0);
 pause(0.2);
@@ -257,10 +296,14 @@ while toc < opts.maxTime
     latestOdom = dataStore.odometry(end, 2:3)';
     latestDepth = dataStore.rsdepth(end, 2:end)';
     tags = RealSenseTag(Robot);
+    processNoise = opts.processNoise;
+    if opts.useScaledProcessNoise
+        processNoise = localScaledProcessNoise(latestOdom, opts);
+    end
 
     [state, particlesPre] = localizeStepPF( ...
         state, latestOdom, latestDepth, map, opts.sensorOrigin, angles, ...
-        struct('processNoise', opts.processNoise, ...
+        struct('processNoise', processNoise, ...
                'measurementNoise', opts.measurementNoise, ...
                'tags', tags, ...
                'beaconLoc', beaconLoc, ...
@@ -268,7 +311,17 @@ while toc < opts.maxTime
                'beaconWeightFactor', opts.beaconWeightFactor, ...
                'beaconSensorOrigin', opts.beaconSensorOrigin));
 
+    [pfSpread, neff] = localPFHealth(particlesPre);
     poseEst = state.poseEstimate;
+    if opts.pfReseedOnTags && localShouldReseedPF(pfSpread, neff, size(tags, 1), opts)
+        fprintf('PF reseed near control pose | spread=%.3f Neff=%.1f tags=%d\n', ...
+            pfSpread, neff, size(tags, 1));
+        state.particles = initParticlesFromPose( ...
+            controlPose, opts.numParticles, opts.pfReseedPositionSigma, opts.pfReseedThetaSigma);
+        state.poseEstimate = controlPose;
+        poseEst = controlPose;
+        particlesPre = [];
+    end
     controlPose = localUpdateControlPose(controlPose, poseEst, size(tags, 1), opts);
     poseCtrl = controlPose;
     dataStore.pfEstimate = [dataStore.pfEstimate; toc, poseCtrl'];
@@ -346,8 +399,10 @@ while toc < opts.maxTime
     end
 
     [cmdV, cmdW] = feedbackLin(desiredVel(1), desiredVel(2), poseCtrl(3), opts.epsilon);
+    cmdV = max(min(cmdV, opts.maxForwardSpeed), -opts.maxReverseSpeed);
     [cmdV, cmdW] = limitCmds(cmdV, cmdW, opts.maxWheelVelocity, opts.wheel2Center);
     cmdW = max(min(cmdW, opts.maxAngularSpeed), -opts.maxAngularSpeed);
+    [cmdV, cmdW] = limitCmds(cmdV, cmdW, opts.maxWheelVelocity, opts.wheel2Center);
     SetFwdVelAngVelCreate(Robot, cmdV, cmdW);
 
     if mod(iter, opts.plotEvery) == 0 && ~isempty(fig) && isvalid(fig)
@@ -357,8 +412,11 @@ while toc < opts.maxTime
 
     if mod(iter, 10) == 0
         fprintf(['PF estimate: [x=%.3f, y=%.3f, th=%.3f], target=%d, ', ...
-                 'truthDist=%.3f, pathIdx=%d, tags=%d\n'], ...
-            poseCtrl(1), poseCtrl(2), poseCtrl(3), targetIdx, distToGoal, pathTargetIdx, size(tags, 1));
+                 'truthDist=%.3f, pathIdx=%d, tags=%d, spread=%.3f, ', ...
+                 'Neff=%.1f, odom=[%.3f %.3f], cmd=[%.3f %.3f]\n'], ...
+            poseCtrl(1), poseCtrl(2), poseCtrl(3), targetIdx, distToGoal, ...
+            pathTargetIdx, size(tags, 1), pfSpread, neff, latestOdom(1), ...
+            latestOdom(2), cmdV, cmdW);
     end
 
     pause(opts.loopPause);
@@ -465,21 +523,59 @@ function controlPose = localUpdateControlPose(controlPose, pfPose, numVisibleTag
 deltaXY = pfPose(1:2) - controlPose(1:2);
 deltaTheta = localWrapToPi(pfPose(3) - controlPose(3));
 
-if norm(deltaXY) > opts.maxPoseStepForControl
-    deltaXY = deltaXY * (opts.maxPoseStepForControl / norm(deltaXY));
+if numVisibleTags > 0
+    maxPoseStep = max(opts.maxPoseStepForControl, opts.tagSnapAlpha);
+    maxThetaStep = max(opts.maxThetaStepForControl, opts.tagSnapAlpha);
+else
+    maxPoseStep = opts.maxPoseStepForControl;
+    maxThetaStep = opts.maxThetaStepForControl;
 end
-if abs(deltaTheta) > opts.maxThetaStepForControl
-    deltaTheta = sign(deltaTheta) * opts.maxThetaStepForControl;
+
+if norm(deltaXY) > maxPoseStep
+    deltaXY = deltaXY * (maxPoseStep / norm(deltaXY));
+end
+if abs(deltaTheta) > maxThetaStep
+    deltaTheta = sign(deltaTheta) * maxThetaStep;
 end
 
 if numVisibleTags > 0
-    alpha = opts.controlPoseAlphaWithTags;
+    alpha = max(opts.controlPoseAlphaWithTags, opts.tagSnapAlpha);
 else
     alpha = opts.controlPoseAlpha;
 end
 
 controlPose(1:2) = controlPose(1:2) + alpha * deltaXY;
 controlPose(3) = localWrapToPi(controlPose(3) + alpha * deltaTheta);
+end
+
+function [pfSpread, neff] = localPFHealth(particlesPre)
+if isempty(particlesPre)
+    pfSpread = 0;
+    neff = inf;
+    return;
+end
+
+w = particlesPre.weights;
+p = particlesPre.poses;
+pfSpread = sqrt(var(p(1, :)) + var(p(2, :)));
+neff = 1 / sum(w .^ 2);
+end
+
+function processNoise = localScaledProcessNoise(odom, opts)
+distanceStep = abs(odom(1));
+headingStep = abs(odom(2));
+
+positionSigma = opts.processNoisePositionBase + ...
+    opts.processNoisePositionPerMeter * distanceStep;
+thetaSigma = opts.processNoiseThetaBase + ...
+    opts.processNoiseThetaPerRad * headingStep;
+
+processNoise = diag([positionSigma ^ 2, positionSigma ^ 2, thetaSigma ^ 2]);
+end
+
+function reseed = localShouldReseedPF(pfSpread, neff, numVisibleTags, opts)
+reseed = numVisibleTags > 0 && ...
+    (pfSpread > opts.pfMaxSpreadBeforeReseed || neff < opts.pfMinNeffBeforeReseed);
 end
 
 function angleWrapped = localWrapToPi(angle)

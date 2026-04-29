@@ -29,6 +29,9 @@ function result = runInitialLocalizationSimulator(Robot, mapMatPath, opts)
 %                     .wheel2Center          default 0.13 m
 %                     .maxWheelVelocity      default 0.45 m/s
 %                     .sensorOriginForMatch  default [0; 0]
+%                     .beaconSensorOrigin     default [0; 0]
+%                     .beaconSigma            default 0.20
+%                     .beaconWeightFactor     default 4.0
 %                     .scoreSigma            default 0.20
 %                     .verbose               default true
 %
@@ -78,6 +81,15 @@ if ~isfield(opts, 'sensorOriginForMatch')
     % For a full-turn signature we approximate sensing from the robot center.
     opts.sensorOriginForMatch = [0; 0];
 end
+if ~isfield(opts, 'beaconSensorOrigin')
+    opts.beaconSensorOrigin = [0; 0];
+end
+if ~isfield(opts, 'beaconSigma')
+    opts.beaconSigma = 0.20;
+end
+if ~isfield(opts, 'beaconWeightFactor')
+    opts.beaconWeightFactor = 4.0;
+end
 if ~isfield(opts, 'scoreSigma')
     opts.scoreSigma = 0.20;
 end
@@ -97,6 +109,8 @@ DistanceSensorRoomba(Robot);
 
 rawAngles = [];
 rawDepth = [];
+rawBeaconAngles = [];
+rawBeaconTags = zeros(0, 5);
 turnAngle = 0;
 
 initialDepth = RealSenseDist(Robot);
@@ -107,6 +121,12 @@ if ~isempty(initialDepth)
         rawAngles(end + 1, 1) = 0; %#ok<AGROW>
         rawDepth(end + 1, 1) = centerDepth; %#ok<AGROW>
     end
+end
+
+initialTags = RealSenseTag(Robot);
+if ~isempty(initialTags)
+    rawBeaconAngles = [rawBeaconAngles; zeros(size(initialTags, 1), 1)];
+    rawBeaconTags = [rawBeaconTags; initialTags];
 end
 
 [cmdV, cmdW] = limitCmds(0, opts.turnRate, opts.maxWheelVelocity, opts.wheel2Center);
@@ -134,6 +154,12 @@ while turnAngle < opts.maxTurnAngle
 
     rawAngles(end + 1, 1) = localWrapToPi(turnAngle); %#ok<AGROW>
     rawDepth(end + 1, 1) = centerDepth; %#ok<AGROW>
+
+    tags = RealSenseTag(Robot);
+    if ~isempty(tags)
+        rawBeaconAngles = [rawBeaconAngles; repmat(localWrapToPi(turnAngle), size(tags, 1), 1)]; %#ok<AGROW>
+        rawBeaconTags = [rawBeaconTags; tags]; %#ok<AGROW>
+    end
 end
 
 SetFwdVelAngVelCreate(Robot, 0, 0);
@@ -147,7 +173,12 @@ end
 scoreOpts = struct( ...
     'sigma', opts.scoreSigma, ...
     'maxRange', 10.0, ...
-    'nanPenalty', log(0.01));
+    'nanPenalty', log(0.01), ...
+    'beaconLoc', localGetField(mapStruct, 'beaconLoc', []), ...
+    'beaconObservations', localBuildBeaconObservations(rawBeaconAngles, rawBeaconTags), ...
+    'beaconSensorOrigin', opts.beaconSensorOrigin, ...
+    'beaconSigma', opts.beaconSigma, ...
+    'beaconWeightFactor', opts.beaconWeightFactor);
 
 result = initializeFromWaypoints( ...
     mapStruct, signatureDepth, opts.headingHypotheses, ...
@@ -157,6 +188,8 @@ result.signatureAngles = signatureAngles;
 result.signatureDepth = signatureDepth;
 result.rawAngles = rawAngles;
 result.rawDepth = rawDepth;
+result.rawBeaconAngles = rawBeaconAngles;
+result.rawBeaconTags = rawBeaconTags;
 
 if opts.verbose
     fprintf('\nInitial localization complete.\n');
@@ -164,6 +197,30 @@ if opts.verbose
         result.bestPose(1), result.bestPose(2), result.bestPose(3));
     fprintf('Best waypoint index: %d\n', result.bestWaypointIdx);
     fprintf('Best heading index : %d\n', result.bestHeadingIdx);
+    fprintf('Beacon observations during initialization: %d\n', size(rawBeaconTags, 1));
+end
+end
+
+function observations = localBuildBeaconObservations(rawBeaconAngles, rawBeaconTags)
+observations = zeros(0, 4);
+if isempty(rawBeaconTags)
+    return;
+end
+
+for i = 1:size(rawBeaconTags, 1)
+    observations(end + 1, :) = [ ...
+        rawBeaconTags(i, 2), ...
+        rawBeaconTags(i, 3), ...
+        rawBeaconTags(i, 4), ...
+        rawBeaconAngles(i)]; %#ok<AGROW>
+end
+end
+
+function value = localGetField(s, name, defaultValue)
+if isfield(s, name)
+    value = s.(name);
+else
+    value = defaultValue;
 end
 end
 
