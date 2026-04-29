@@ -77,10 +77,10 @@ if ~isfield(opts, 'plotEvery')
     opts.plotEvery = 2;
 end
 if ~isfield(opts, 'beaconSigma')
-    opts.beaconSigma = 0.05;
+    opts.beaconSigma = 0.04;
 end
 if ~isfield(opts, 'beaconWeightFactor')
-    opts.beaconWeightFactor = 6.0;
+    opts.beaconWeightFactor = 8.0;
 end
 if ~isfield(opts, 'beaconSensorOrigin')
     opts.beaconSensorOrigin = [0; 0];
@@ -121,6 +121,18 @@ end
 if ~isfield(opts, 'showWindow')
     opts.showWindow = true;
 end
+if ~isfield(opts, 'controlPoseAlpha')
+    opts.controlPoseAlpha = 0.20;
+end
+if ~isfield(opts, 'controlPoseAlphaWithTags')
+    opts.controlPoseAlphaWithTags = 0.35;
+end
+if ~isfield(opts, 'maxPoseStepForControl')
+    opts.maxPoseStepForControl = 0.18;
+end
+if ~isfield(opts, 'maxThetaStepForControl')
+    opts.maxThetaStepForControl = 0.45;
+end
 
 angles = linspace(27 * pi / 180, -27 * pi / 180, 10)';
 stayAwayPoints = zeros(0, 2);
@@ -134,6 +146,7 @@ boundary = [min(map(:, [1, 3]), [], 'all'), ...
 
 global dataStore;
 dataStore = struct( ...
+    'truthPose', [], ...
     'odometry', [], ...
     'rsdepth', [], ...
     'bump', [], ...
@@ -194,6 +207,7 @@ result.initResult = initResult;
 state.particles = initParticlesFromPose(initResult.bestPose, opts.numParticles);
 state.poseEstimate = initResult.bestPose;
 result.finalPoseEstimate = initResult.bestPose;
+controlPose = initResult.bestPose;
 
 AngleSensorRoomba(Robot);
 DistanceSensorRoomba(Robot);
@@ -255,12 +269,15 @@ while toc < opts.maxTime
                'beaconSensorOrigin', opts.beaconSensorOrigin));
 
     poseEst = state.poseEstimate;
-    dataStore.pfEstimate = [dataStore.pfEstimate; toc, poseEst'];
+    controlPose = localUpdateControlPose(controlPose, poseEst, size(tags, 1), opts);
+    poseCtrl = controlPose;
+    dataStore.pfEstimate = [dataStore.pfEstimate; toc, poseCtrl'];
     dataStore.targetIdx = [dataStore.targetIdx; toc, targetIdx];
     dataStore.visibleTags = [dataStore.visibleTags; toc, size(tags, 1)];
 
     currentTarget = plannedWaypoints(targetIdx, :);
-    deltaToGoal = currentTarget(:) - poseEst(1:2);
+    reachPoseXY = localReachPoseXY(dataStore, poseCtrl);
+    deltaToGoal = currentTarget(:) - reachPoseXY(:);
     distToGoal = norm(deltaToGoal);
 
     if distToGoal <= opts.closeEnough
@@ -296,7 +313,7 @@ while toc < opts.maxTime
 
     if isempty(currentPath) || mod(iter, opts.replanEvery) == 1
         previousPath = currentPath;
-        [candidatePath, ~, ~, found] = planPathAStar(map, boundary, poseEst(1:2)', currentTarget, plannerOpts);
+        [candidatePath, ~, ~, found] = planPathAStar(map, boundary, poseCtrl(1:2)', currentTarget, plannerOpts);
         if found && ~isempty(candidatePath)
             currentPath = candidatePath;
             dataStore.plannedPath = currentPath;
@@ -310,12 +327,12 @@ while toc < opts.maxTime
     end
 
     while pathTargetIdx < size(currentPath, 1) && ...
-            norm(currentPath(pathTargetIdx, :)' - poseEst(1:2)) < opts.lookaheadDistance
+            norm(currentPath(pathTargetIdx, :)' - poseCtrl(1:2)) < opts.lookaheadDistance
         pathTargetIdx = pathTargetIdx + 1;
     end
 
     localTarget = currentPath(pathTargetIdx, :);
-    delta = localTarget(:) - poseEst(1:2);
+    delta = localTarget(:) - poseCtrl(1:2);
     distToLocal = norm(delta);
 
     if distToLocal < 1e-6
@@ -328,7 +345,7 @@ while toc < opts.maxTime
         desiredVel = speed * delta / distToLocal;
     end
 
-    [cmdV, cmdW] = feedbackLin(desiredVel(1), desiredVel(2), poseEst(3), opts.epsilon);
+    [cmdV, cmdW] = feedbackLin(desiredVel(1), desiredVel(2), poseCtrl(3), opts.epsilon);
     [cmdV, cmdW] = limitCmds(cmdV, cmdW, opts.maxWheelVelocity, opts.wheel2Center);
     cmdW = max(min(cmdW, opts.maxAngularSpeed), -opts.maxAngularSpeed);
     SetFwdVelAngVelCreate(Robot, cmdV, cmdW);
@@ -340,8 +357,8 @@ while toc < opts.maxTime
 
     if mod(iter, 10) == 0
         fprintf(['PF estimate: [x=%.3f, y=%.3f, th=%.3f], target=%d, ', ...
-                 'goalDist=%.3f, pathIdx=%d, tags=%d\n'], ...
-            poseEst(1), poseEst(2), poseEst(3), targetIdx, distToGoal, pathTargetIdx, size(tags, 1));
+                 'truthDist=%.3f, pathIdx=%d, tags=%d\n'], ...
+            poseCtrl(1), poseCtrl(2), poseCtrl(3), targetIdx, distToGoal, pathTargetIdx, size(tags, 1));
     end
 
     pause(opts.loopPause);
@@ -444,6 +461,31 @@ while targetIdx <= size(waypoints, 1) && norm(waypoints(targetIdx, :) - startPos
 end
 end
 
+function controlPose = localUpdateControlPose(controlPose, pfPose, numVisibleTags, opts)
+deltaXY = pfPose(1:2) - controlPose(1:2);
+deltaTheta = localWrapToPi(pfPose(3) - controlPose(3));
+
+if norm(deltaXY) > opts.maxPoseStepForControl
+    deltaXY = deltaXY * (opts.maxPoseStepForControl / norm(deltaXY));
+end
+if abs(deltaTheta) > opts.maxThetaStepForControl
+    deltaTheta = sign(deltaTheta) * opts.maxThetaStepForControl;
+end
+
+if numVisibleTags > 0
+    alpha = opts.controlPoseAlphaWithTags;
+else
+    alpha = opts.controlPoseAlpha;
+end
+
+controlPose(1:2) = controlPose(1:2) + alpha * deltaXY;
+controlPose(3) = localWrapToPi(controlPose(3) + alpha * deltaTheta);
+end
+
+function angleWrapped = localWrapToPi(angle)
+angleWrapped = mod(angle + pi, 2 * pi) - pi;
+end
+
 function localUpdatePlot(fig, map, beaconLoc, stayAwayPoints, waypoints, targetIdx, currentPath, pathTargetIdx, particlesPre, dataStore)
 figure(fig);
 clf(fig);
@@ -493,6 +535,12 @@ if ~isempty(dataStore.pfEstimate)
         'MarkerFaceColor', 'r');
 end
 
+if isfield(dataStore, 'truthPose') && ~isempty(dataStore.truthPose)
+    plot(ax, dataStore.truthPose(:, 2), dataStore.truthPose(:, 3), 'g--', 'LineWidth', 1.2);
+    plot(ax, dataStore.truthPose(end, 2), dataStore.truthPose(end, 3), 'go', ...
+        'MarkerFaceColor', 'g');
+end
+
 xlim(ax, [min(map(:, [1, 3]), [], 'all') - 0.5, max(map(:, [1, 3]), [], 'all') + 0.5]);
 ylim(ax, [min(map(:, [2, 4]), [], 'all') - 0.5, max(map(:, [2, 4]), [], 'all') + 0.5]);
 numVisible = 0;
@@ -517,6 +565,12 @@ try
     CreatePort = Robot.CreatePort;
 catch
     CreatePort = Robot;
+end
+
+try
+    [px, py, pt] = OverheadLocalizationCreate(Robot);
+    dataStore.truthPose = [dataStore.truthPose; toc, px, py, pt];
+catch
 end
 
 try
@@ -550,6 +604,14 @@ try
     end
 catch
     disp('Error retrieving or saving beacon data.');
+end
+end
+
+function reachPoseXY = localReachPoseXY(dataStore, fallbackPose)
+if isfield(dataStore, 'truthPose') && ~isempty(dataStore.truthPose)
+    reachPoseXY = dataStore.truthPose(end, 2:3)';
+else
+    reachPoseXY = fallbackPose(1:2);
 end
 end
 
