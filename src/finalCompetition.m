@@ -112,6 +112,9 @@ end
 if ~isfield(opts, 'lookaheadDistance')
     opts.lookaheadDistance = 0.25;
 end
+if ~isfield(opts, 'nearGoalLookaheadDistance')
+    opts.nearGoalLookaheadDistance = 0.15;
+end
 if ~isfield(opts, 'replanEvery')
     opts.replanEvery = 5;
 end
@@ -129,6 +132,30 @@ if ~isfield(opts, 'preferredClearance')
 end
 if ~isfield(opts, 'clearanceWeight')
     opts.clearanceWeight = 2.0;
+end
+if ~isfield(opts, 'maxShortcutLength')
+    opts.maxShortcutLength = 0.25;
+end
+if ~isfield(opts, 'nearGoalShortcutLength')
+    opts.nearGoalShortcutLength = 0.12;
+end
+if ~isfield(opts, 'nearGoalSlowRadius')
+    opts.nearGoalSlowRadius = 0.80;
+end
+if ~isfield(opts, 'nearGoalMinSpeed')
+    opts.nearGoalMinSpeed = 0.055;
+end
+if ~isfield(opts, 'snakeAngularThreshold')
+    opts.snakeAngularThreshold = 0.45;
+end
+if ~isfield(opts, 'snakeProgressThreshold')
+    opts.snakeProgressThreshold = 0.003;
+end
+if ~isfield(opts, 'snakeTriggerCount')
+    opts.snakeTriggerCount = 18;
+end
+if ~isfield(opts, 'snakeRecoverySteps')
+    opts.snakeRecoverySteps = 20;
 end
 if ~isfield(opts, 'initTurnRate')
     opts.initTurnRate = 0.5;
@@ -185,7 +212,6 @@ boundary = [min(map(:, [1, 3]), [], 'all'), ...
 
 global dataStore;
 dataStore = struct( ...
-    'truthPose', [], ...
     'odometry', [], ...
     'rsdepth', [], ...
     'bump', [], ...
@@ -211,6 +237,10 @@ result.replanCount = 0;
 iter = 0;
 currentPath = zeros(0, 2);
 pathTargetIdx = 1;
+snakeCount = 0;
+snakeRecoveryCounter = 0;
+prevDistToGoal = inf;
+prevCmdWSign = 0;
 
 fig = [];
 if opts.showWindow
@@ -329,8 +359,7 @@ while toc < opts.maxTime
     dataStore.visibleTags = [dataStore.visibleTags; toc, size(tags, 1)];
 
     currentTarget = plannedWaypoints(targetIdx, :);
-    reachPoseXY = localReachPoseXY(dataStore, poseCtrl);
-    deltaToGoal = currentTarget(:) - reachPoseXY(:);
+    deltaToGoal = currentTarget(:) - poseCtrl(1:2);
     distToGoal = norm(deltaToGoal);
 
     if distToGoal <= opts.closeEnough
@@ -352,9 +381,25 @@ while toc < opts.maxTime
 
         currentPath = zeros(0, 2);
         pathTargetIdx = 1;
+        snakeCount = 0;
+        snakeRecoveryCounter = 0;
+        prevDistToGoal = inf;
+        prevCmdWSign = 0;
         result.remainingGoals = plannedWaypoints(targetIdx:end, :);
         result.globalVisitOrder = result.remainingGoals;
         currentTarget = plannedWaypoints(targetIdx, :);
+    end
+
+    dynamicLookahead = opts.lookaheadDistance;
+    dynamicShortcutLength = opts.maxShortcutLength;
+    if distToGoal <= opts.nearGoalSlowRadius
+        dynamicLookahead = min(dynamicLookahead, opts.nearGoalLookaheadDistance);
+        dynamicShortcutLength = min(dynamicShortcutLength, opts.nearGoalShortcutLength);
+    end
+    if snakeRecoveryCounter > 0
+        dynamicLookahead = min(dynamicLookahead, opts.nearGoalLookaheadDistance);
+        dynamicShortcutLength = min(dynamicShortcutLength, opts.nearGoalShortcutLength);
+        snakeRecoveryCounter = snakeRecoveryCounter - 1;
     end
 
     plannerOpts = struct('resolution', opts.planResolution, ...
@@ -362,7 +407,8 @@ while toc < opts.maxTime
                          'stayAwayPoints', stayAwayPoints, ...
                          'stayAwayRadius', opts.stayAwayInflation, ...
                          'preferredClearance', opts.preferredClearance, ...
-                         'clearanceWeight', opts.clearanceWeight);
+                         'clearanceWeight', opts.clearanceWeight, ...
+                         'maxShortcutLength', dynamicShortcutLength);
 
     if isempty(currentPath) || mod(iter, opts.replanEvery) == 1
         previousPath = currentPath;
@@ -380,7 +426,7 @@ while toc < opts.maxTime
     end
 
     while pathTargetIdx < size(currentPath, 1) && ...
-            norm(currentPath(pathTargetIdx, :)' - poseCtrl(1:2)) < opts.lookaheadDistance
+            norm(currentPath(pathTargetIdx, :)' - poseCtrl(1:2)) < dynamicLookahead
         pathTargetIdx = pathTargetIdx + 1;
     end
 
@@ -392,6 +438,11 @@ while toc < opts.maxTime
         desiredVel = [0; 0];
     else
         speed = opts.desiredSpeed;
+        if distToGoal <= opts.nearGoalSlowRadius
+            slowScale = max(distToGoal / opts.nearGoalSlowRadius, 0);
+            speed = opts.nearGoalMinSpeed + ...
+                (opts.desiredSpeed - opts.nearGoalMinSpeed) * slowScale;
+        end
         if distToLocal < 0.4
             speed = speed * max(distToLocal / 0.4, 0.25);
         end
@@ -405,6 +456,31 @@ while toc < opts.maxTime
     [cmdV, cmdW] = limitCmds(cmdV, cmdW, opts.maxWheelVelocity, opts.wheel2Center);
     SetFwdVelAngVelCreate(Robot, cmdV, cmdW);
 
+    progressToGoal = prevDistToGoal - distToGoal;
+    cmdWSign = sign(cmdW);
+    isOscillating = abs(cmdW) >= opts.snakeAngularThreshold && ...
+        cmdWSign ~= 0 && prevCmdWSign ~= 0 && cmdWSign ~= prevCmdWSign;
+    isNotProgressing = isfinite(progressToGoal) && ...
+        progressToGoal < opts.snakeProgressThreshold;
+    if isNotProgressing && (isOscillating || abs(cmdW) >= opts.snakeAngularThreshold)
+        snakeCount = snakeCount + 1;
+    else
+        snakeCount = max(0, snakeCount - 1);
+    end
+    if snakeCount >= opts.snakeTriggerCount
+        fprintf(['Snake recovery: low progress with high angular command. ', ...
+                 'target=%d dist=%.3f pathIdx=%d cmd=[%.3f %.3f]\n'], ...
+            targetIdx, distToGoal, pathTargetIdx, cmdV, cmdW);
+        currentPath = zeros(0, 2);
+        pathTargetIdx = 1;
+        snakeCount = 0;
+        snakeRecoveryCounter = opts.snakeRecoverySteps;
+    end
+    prevDistToGoal = distToGoal;
+    if cmdWSign ~= 0
+        prevCmdWSign = cmdWSign;
+    end
+
     if mod(iter, opts.plotEvery) == 0 && ~isempty(fig) && isvalid(fig)
         localUpdatePlot(fig, map, beaconLoc, stayAwayPoints, opts.waypoints, targetIdx, ...
             currentPath, pathTargetIdx, particlesPre, dataStore);
@@ -412,11 +488,12 @@ while toc < opts.maxTime
 
     if mod(iter, 10) == 0
         fprintf(['PF estimate: [x=%.3f, y=%.3f, th=%.3f], target=%d, ', ...
-                 'truthDist=%.3f, pathIdx=%d, tags=%d, spread=%.3f, ', ...
-                 'Neff=%.1f, odom=[%.3f %.3f], cmd=[%.3f %.3f]\n'], ...
+                 'goalDist=%.3f, pathIdx=%d, tags=%d, spread=%.3f, ', ...
+                 'Neff=%.1f, odom=[%.3f %.3f], cmd=[%.3f %.3f], ', ...
+                 'lookahead=%.2f, shortcut=%.2f, snake=%d\n'], ...
             poseCtrl(1), poseCtrl(2), poseCtrl(3), targetIdx, distToGoal, ...
             pathTargetIdx, size(tags, 1), pfSpread, neff, latestOdom(1), ...
-            latestOdom(2), cmdV, cmdW);
+            latestOdom(2), cmdV, cmdW, dynamicLookahead, dynamicShortcutLength, snakeCount);
     end
 
     pause(opts.loopPause);
@@ -466,6 +543,7 @@ plannerOpts = struct( ...
     'stayAwayInflation', opts.stayAwayInflation, ...
     'preferredClearance', opts.preferredClearance, ...
     'clearanceWeight', opts.clearanceWeight, ...
+    'maxShortcutLength', opts.maxShortcutLength, ...
     'nPRM', 150);
 
     [~, costMatrix, ~, nodeMeta] = precomputePairwisePathCosts( ...
@@ -631,12 +709,6 @@ if ~isempty(dataStore.pfEstimate)
         'MarkerFaceColor', 'r');
 end
 
-if isfield(dataStore, 'truthPose') && ~isempty(dataStore.truthPose)
-    plot(ax, dataStore.truthPose(:, 2), dataStore.truthPose(:, 3), 'g--', 'LineWidth', 1.2);
-    plot(ax, dataStore.truthPose(end, 2), dataStore.truthPose(end, 3), 'go', ...
-        'MarkerFaceColor', 'g');
-end
-
 xlim(ax, [min(map(:, [1, 3]), [], 'all') - 0.5, max(map(:, [1, 3]), [], 'all') + 0.5]);
 ylim(ax, [min(map(:, [2, 4]), [], 'all') - 0.5, max(map(:, [2, 4]), [], 'all') + 0.5]);
 numVisible = 0;
@@ -661,12 +733,6 @@ try
     CreatePort = Robot.CreatePort;
 catch
     CreatePort = Robot;
-end
-
-try
-    [px, py, pt] = OverheadLocalizationCreate(Robot);
-    dataStore.truthPose = [dataStore.truthPose; toc, px, py, pt];
-catch
 end
 
 try
@@ -700,14 +766,6 @@ try
     end
 catch
     disp('Error retrieving or saving beacon data.');
-end
-end
-
-function reachPoseXY = localReachPoseXY(dataStore, fallbackPose)
-if isfield(dataStore, 'truthPose') && ~isempty(dataStore.truthPose)
-    reachPoseXY = dataStore.truthPose(end, 2:3)';
-else
-    reachPoseXY = fallbackPose(1:2);
 end
 end
 

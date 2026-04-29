@@ -26,6 +26,9 @@ end
 if ~isfield(opts, 'clearanceWeight')
     opts.clearanceWeight = 1.5;
 end
+if ~isfield(opts, 'maxShortcutLength')
+    opts.maxShortcutLength = 0.25;
+end
 
 grid = buildOccupancyGrid( ...
     map, boundary, opts.resolution, opts.inflationRadius, ...
@@ -66,7 +69,7 @@ traversalCost(grid.occupancy) = inf;
 end
 
 pathWorld = [grid.xCenters(pathIdx(:, 2))', grid.yCenters(pathIdx(:, 1))'];
-pathWorld = simplifyPath(pathWorld, 0.15);
+pathWorld = simplifyPath(pathWorld, grid, opts.maxShortcutLength);
 pathWorld = [startXY(:)'; pathWorld];
 
 if norm(pathWorld(end, :) - goalXY(:)') > 1e-9
@@ -80,21 +83,44 @@ function idx = worldToGrid(pointXY, grid)
 idx = [row, col];
 end
 
-function pathOut = simplifyPath(pathIn, spacing)
+function pathOut = simplifyPath(pathIn, grid, maxShortcutLength)
 if size(pathIn, 1) <= 2
     pathOut = pathIn;
     return;
 end
 
 pathOut = pathIn(1, :);
-lastKeep = pathIn(1, :);
-for i = 2:size(pathIn, 1) - 1
-    if norm(pathIn(i, :) - lastKeep) >= spacing
-        pathOut = [pathOut; pathIn(i, :)]; %#ok<AGROW>
-        lastKeep = pathIn(i, :);
+anchorIdx = 1;
+
+while anchorIdx < size(pathIn, 1)
+    nextIdx = anchorIdx + 1;
+    for candidateIdx = size(pathIn, 1):-1:(anchorIdx + 1)
+        shortcutLength = norm(pathIn(candidateIdx, :) - pathIn(anchorIdx, :));
+        if shortcutLength <= maxShortcutLength && ...
+                lineSegmentIsFree(pathIn(anchorIdx, :), pathIn(candidateIdx, :), grid)
+            nextIdx = candidateIdx;
+            break;
+        end
+    end
+    pathOut = [pathOut; pathIn(nextIdx, :)]; %#ok<AGROW>
+    anchorIdx = nextIdx;
+end
+end
+
+function free = lineSegmentIsFree(p1, p2, grid)
+segmentLength = norm(p2 - p1);
+numSamples = max(2, ceil(segmentLength / (grid.resolution * 0.5)) + 1);
+free = true;
+
+for i = 1:numSamples
+    t = (i - 1) / (numSamples - 1);
+    p = (1 - t) * p1 + t * p2;
+    idx = worldToGrid(p, grid);
+    if isempty(idx) || grid.occupancy(idx(1), idx(2))
+        free = false;
+        return;
     end
 end
-pathOut = [pathOut; pathIn(end, :)];
 end
 
 function idxFree = nearestFreeGridCell(idx, occupancy)
