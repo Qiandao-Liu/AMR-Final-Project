@@ -19,6 +19,7 @@ function grid = buildOccupancyGrid(map, boundary, resolution, inflationRadius, s
 %                          .xCenters
 %                          .yCenters
 %                          .occupancy  (ny x nx logical)
+%                          .clearance  distance to nearest inflated obstacle source
 
 if nargin < 5 || isempty(stayAwayPoints)
     stayAwayPoints = zeros(0, 2);
@@ -32,15 +33,16 @@ yCenters = boundary(2):resolution:boundary(4);
 [X, Y] = meshgrid(xCenters, yCenters);
 
 occupancy = false(size(X));
+clearance = inf(size(X));
 
 % Mark cells close to any wall as occupied.
 for i = 1:numel(X)
     p = [X(i), Y(i)];
     for j = 1:size(map, 1)
         d = pointToSegmentDistance(p, map(j, 1:2), map(j, 3:4));
+        clearance(i) = min(clearance(i), d);
         if d <= inflationRadius
             occupancy(i) = true;
-            break;
         end
     end
 end
@@ -48,6 +50,7 @@ end
 % Mark cells near stay-away points as occupied as well.
 for k = 1:size(stayAwayPoints, 1)
     d = hypot(X - stayAwayPoints(k, 1), Y - stayAwayPoints(k, 2));
+    clearance = min(clearance, d);
     occupancy = occupancy | (d <= stayAwayRadius);
 end
 
@@ -57,6 +60,7 @@ grid.boundary = boundary;
 grid.xCenters = xCenters;
 grid.yCenters = yCenters;
 grid.occupancy = occupancy;
+grid.clearance = clearance;
 end
 
 function d = pointToSegmentDistance(p, a, b)

@@ -20,10 +20,17 @@ end
 if ~isfield(opts, 'stayAwayRadius')
     opts.stayAwayRadius = 0.25;
 end
+if ~isfield(opts, 'preferredClearance')
+    opts.preferredClearance = opts.inflationRadius + 0.20;
+end
+if ~isfield(opts, 'clearanceWeight')
+    opts.clearanceWeight = 1.5;
+end
 
 grid = buildOccupancyGrid( ...
     map, boundary, opts.resolution, opts.inflationRadius, ...
     opts.stayAwayPoints, opts.stayAwayRadius);
+traversalCost = localClearanceTraversalCost(grid, opts.preferredClearance, opts.clearanceWeight);
 
 startIdx = worldToGrid(startXY, grid);
 goalIdx = worldToGrid(goalXY, grid);
@@ -37,11 +44,25 @@ if isempty(startIdx) || isempty(goalIdx)
     return;
 end
 
-[pathIdx, found] = astarGrid(grid.occupancy, startIdx, goalIdx);
+[pathIdx, found] = astarGrid(grid.occupancy, startIdx, goalIdx, traversalCost);
 
 if ~found
     pathWorld = zeros(0, 2);
     return;
+end
+
+function traversalCost = localClearanceTraversalCost(grid, preferredClearance, clearanceWeight)
+traversalCost = zeros(size(grid.occupancy));
+
+if clearanceWeight <= 0 || preferredClearance <= 0
+    return;
+end
+
+clearance = grid.clearance;
+clearance(~isfinite(clearance)) = preferredClearance;
+deficit = max(0, preferredClearance - clearance) / preferredClearance;
+traversalCost = clearanceWeight * deficit .^ 2;
+traversalCost(grid.occupancy) = inf;
 end
 
 pathWorld = [grid.xCenters(pathIdx(:, 2))', grid.yCenters(pathIdx(:, 1))'];

@@ -1,9 +1,12 @@
-function [pathIdx, found] = astarGrid(occupancy, startIdx, goalIdx)
+function [pathIdx, found] = astarGrid(occupancy, startIdx, goalIdx, traversalCost)
 % ASTARGRID Run A* on a binary occupancy grid using 8-connected motion.
 %
 %   [pathIdx, found] = astarGrid(occupancy, startIdx, goalIdx)
 
 [ny, nx] = size(occupancy);
+if nargin < 4 || isempty(traversalCost)
+    traversalCost = zeros(ny, nx);
+end
 startLin = sub2ind([ny, nx], startIdx(1), startIdx(2));
 goalLin = sub2ind([ny, nx], goalIdx(1), goalIdx(2));
 
@@ -57,7 +60,7 @@ while any(openSet(:))
             continue;
         end
 
-        stepCost = norm(neighbors(k, :));
+        stepCost = norm(neighbors(k, :)) + traversalCost(nyi, nxi);
         tentativeG = gScore(cy, cx) + stepCost;
 
         if ~openSet(nyi, nxi)
