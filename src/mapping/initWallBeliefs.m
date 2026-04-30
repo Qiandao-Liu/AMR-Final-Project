@@ -11,16 +11,21 @@ function wallBeliefs = initWallBeliefs(optWalls)
 %                      .geometry     1x4 coordinates [x1 y1 x2 y2]
 %                      .probPresent  Scalar probability (0 to 1)
 %                      .observationCount  Number of times wall has been seen
-%                      .status       'unknown', 'present', or 'absent'
+%                      .status       String: 'unchecked', 'confirmed_present', 
+%                                    or 'confirmed_absent'
 %
-%   Note: Initial probability is set to 0.5.
+%   Note: The 'unchecked' status supports optimistic planning, where walls 
+%         are assumed absent until the robot's planned path intersects them, 
+%         triggering a dedicated probing action.
 
 numWalls = size(optWalls, 1);
+
+% Initialize the struct array. Using a cell for 'geometry' triggers 
+% the broadcast creation of the struct array.
 wallBeliefs = struct( ...
     'geometry', cell(numWalls, 1), ...
     'probPresent', 0.5, ...
-    'observationCount', 0, ...
-    'status', 'unknown');
+    'status', 'unchecked');
 
 for i = 1:numWalls
     wallBeliefs(i).geometry = optWalls(i, :);

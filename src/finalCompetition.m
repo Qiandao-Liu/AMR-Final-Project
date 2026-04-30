@@ -24,7 +24,6 @@ end
 mapMatPath = localResolveMapPath(mapMatPath);
 mapStruct = load(mapMatPath);
 map = mapStruct.map;
-candidateStarts = mapStruct.waypoints;
 
 beaconLoc = zeros(0, 3);
 if isfield(mapStruct, 'beaconLoc')
@@ -68,7 +67,7 @@ if ~isfield(opts, 'maxWheelVelocity')
     opts.maxWheelVelocity = 0.25;
 end
 if ~isfield(opts, 'sensorOrigin')
-    opts.sensorOrigin = [0.13; 0];
+    opts.sensorOrigin = [0; 0.08];
 end
 if ~isfield(opts, 'numParticles')
     opts.numParticles = 500;
@@ -273,22 +272,30 @@ initOpts.signatureBins(end) = [];
 initResult = runInitialLocalizationSimulator(Robot, mapMatPath, initOpts);
 result.initResult = initResult;
 
+AngleSensorRoomba(Robot);
+DistanceSensorRoomba(Robot);
+
+% Initialize PF state
 state.particles = initParticlesFromPose(initResult.bestPose, opts.numParticles);
 state.poseEstimate = initResult.bestPose;
 result.finalPoseEstimate = initResult.bestPose;
 controlPose = initResult.bestPose;
 
-AngleSensorRoomba(Robot);
-DistanceSensorRoomba(Robot);
+% Initialize optWall Beliefs
+result.wallBeliefs = initWallBeliefs(mapStruct.optWalls);
+confirmedPresentWalls = zeros(0, 4);
+isProbing = false;
+probeWallIdx = 0;
+currentNavMap = map;
 
-plannedWaypoints = opts.waypoints;
-if opts.useGlobalPlanning
-    plannedWaypoints = localBuildPlannedOrder( ...
-        mapStruct, candidateStarts, opts.waypoints, initResult, opts);
-end
+% Initial global planning
+allGoalPoints = localResolveFinalTargets(mapStruct);
+currentStartXY = initResult.bestPose(1:2)';
+plannedWaypoints = localBuildPlannedOrder(currentNavMap, currentStartXY, allGoalPoints, opts, stayAwayPoints, boundary);
 opts.waypoints = plannedWaypoints;
 
 targetIdx = localInitialTargetIndex(initResult.bestPose, plannedWaypoints, opts.closeEnough);
+
 if targetIdx > 1
     result.visitedWaypoints = plannedWaypoints(1:targetIdx - 1, :);
 end
@@ -303,7 +310,7 @@ end
 if targetIdx > size(plannedWaypoints, 1)
     result.reachedAll = true;
     result.finalPoseEstimate = state.poseEstimate;
-    fprintf('Initialization pose is already within tolerance of all final-competition targets.\n');
+    fprintf('Initialization pose is already within tolerance of all targets.\n');
     return;
 end
 
@@ -311,6 +318,7 @@ fprintf('Final competition order:\n');
 for i = targetIdx:size(plannedWaypoints, 1)
     fprintf('  %d: [%.2f, %.2f]\n', i, plannedWaypoints(i, 1), plannedWaypoints(i, 2));
 end
+
 
 tic;
 while toc < opts.maxTime
@@ -332,7 +340,7 @@ while toc < opts.maxTime
     end
 
     [state, particlesPre] = localizeStepPF( ...
-        state, latestOdom, latestDepth, map, opts.sensorOrigin, angles, ...
+        state, latestOdom, latestDepth, currentNavMap, opts.sensorOrigin, angles, ...
         struct('processNoise', processNoise, ...
                'measurementNoise', opts.measurementNoise, ...
                'tags', tags, ...
@@ -362,7 +370,55 @@ while toc < opts.maxTime
     deltaToGoal = currentTarget(:) - poseCtrl(1:2);
     distToGoal = norm(deltaToGoal);
 
-    if distToGoal <= opts.closeEnough
+    % optWall probing mode
+    if isProbing
+        distToProbe = norm(probePose(1:2) - poseCtrl(1:2));
+        angleError = localWrapToPi(probePose(3) - poseCtrl(3));
+
+        if distToProbe > 0.15
+
+        else            
+            if abs(angleError) > (4 * pi / 180)
+                fprintf('Mapping: Rotating to face wall... (Error: %.1f deg)\n', angleError * 180 / pi);
+                cmdV = 0;
+                kW = 0.5; 
+                cmdW = kW * angleError;
+                minW = 0.1;
+                if abs(cmdW) < minW, cmdW = sign(cmdW) * minW; end
+                cmdW = max(min(cmdW, opts.maxAngularSpeed), -opts.maxAngularSpeed);
+    
+                SetFwdVelAngVelCreate(Robot, cmdV, cmdW);
+                pause(opts.loopPause);
+                continue;
+            else % position and orientation are correct, taking measurements
+                fprintf('Mapping: Robot oriented. Measuring wall...\n');
+                SetFwdVelAngVelCreate(Robot, 0, 0);
+                pause(0.8);
+        
+                latestDepth = dataStore.rsdepth(end, 2:end)';
+                isPresent = verifyWallPresence(latestDepth);
+
+                if isPresent
+                    result.wallBeliefs(probeWallIdx).status = 'confirmed_present';
+                    currentNavMap = [currentNavMap; result.wallBeliefs(probeWallIdx).geometry];
+    
+                    % trigger a global reorder
+                    remainingGoals = plannedWaypoints(targetIdx:end, :);
+                    reorderedRemaining = localBuildPlannedOrder(currentNavMap, poseCtrl(1:2)', remainingGoals, opts, stayAwayPoints, boundary);
+                    plannedWaypoints = [plannedWaypoints(1:targetIdx-1, :); reorderedRemaining];
+                else
+                    result.wallBeliefs(probeWallIdx).status = 'confirmed_absent';
+                end
+    
+                isProbing = false;
+                currentPath = zeros(0,2);
+                pathTargetIdx = 1;
+                continue; % skip this iteration and proceed to the next replan
+            end
+        end
+    end
+
+    if ~isProbing && distToGoal <= opts.closeEnough
         fprintf('Reached target %d at [%.3f, %.3f]\n', ...
             targetIdx, currentTarget(1), currentTarget(2));
         if isempty(result.visitedWaypoints)
@@ -412,11 +468,28 @@ while toc < opts.maxTime
 
     if isempty(currentPath) || mod(iter, opts.replanEvery) == 1
         previousPath = currentPath;
-        [candidatePath, ~, ~, found] = planPathAStar(map, boundary, poseCtrl(1:2)', currentTarget, plannerOpts);
+        navMap = [map; confirmedPresentWalls];
+        [candidatePath, ~, ~, found] = planPathAStar(currentNavMap, boundary, poseCtrl(1:2)', currentTarget, plannerOpts);
+        
         if found && ~isempty(candidatePath)
-            currentPath = candidatePath;
-            dataStore.plannedPath = currentPath;
-            pathTargetIdx = 1;
+            collidingWallIdx = findPathWallCollision(candidatePath, result.wallBeliefs);
+            if collidingWallIdx > 0  % trigger probing mode
+                isProbing = true;
+                probeWallIdx = collidingWallIdx;
+                probePose = generateProbePose(poseCtrl, result.wallBeliefs(probeWallIdx).geometry);
+                % modify the A* algorithm to target probe pose instead of the original waypoints
+                [probePath, ~, ~, pFound] = planPathAStar(navMap, boundary, poseCtrl(1:2)', probePose(1:2)', plannerOpts);
+                if pFound
+                    currentPath = probePath;
+                    pathTargetIdx = 1;
+                    dataStore.plannedPath = currentPath;
+                end
+            else
+                isProbing = false;
+                currentPath = candidatePath;
+                pathTargetIdx = 1;
+                dataStore.plannedPath = currentPath;
+            end
         elseif isempty(previousPath)
             warning('A* failed to find an initial path from PF estimate to target %d. Stopping.', targetIdx);
             break;
@@ -517,23 +590,78 @@ fprintf('Final PF estimate: [x=%.3f, y=%.3f, th=%.3f]\n', ...
     result.finalPoseEstimate(1), result.finalPoseEstimate(2), result.finalPoseEstimate(3));
 end
 
-function plannedWaypoints = localBuildPlannedOrder(mapStruct, candidateStarts, goalPoints, initResult, opts)
+% function plannedWaypoints = localBuildPlannedOrder(mapStruct, candidateStarts, goalPoints, initResult, opts)
+% plannedWaypoints = goalPoints;
+% 
+% if isempty(goalPoints)
+%     return;
+% end
+% 
+% stayAwayPoints = zeros(0, 2);
+% if isfield(mapStruct, 'stayAwayPoints')
+%     stayAwayPoints = mapStruct.stayAwayPoints;
+% end
+% 
+% boundary = [min(mapStruct.map(:, [1, 3]), [], 'all'), ...
+%             min(mapStruct.map(:, [2, 4]), [], 'all'), ...
+%             max(mapStruct.map(:, [1, 3]), [], 'all'), ...
+%             max(mapStruct.map(:, [2, 4]), [], 'all')];
+% 
+% plannerOpts = struct( ...
+%     'plannerType', opts.globalPlannerType, ...
+%     'boundary', boundary, ...
+%     'stayAwayPoints', stayAwayPoints, ...
+%     'planResolution', opts.planResolution, ...
+%     'robotInflation', opts.robotInflation, ...
+%     'stayAwayInflation', opts.stayAwayInflation, ...
+%     'preferredClearance', opts.preferredClearance, ...
+%     'clearanceWeight', opts.clearanceWeight, ...
+%     'maxShortcutLength', opts.maxShortcutLength, ...
+%     'nPRM', 150);
+% 
+%     [~, costMatrix, ~, nodeMeta] = precomputePairwisePathCosts( ...
+%         mapStruct.map, candidateStarts, goalPoints, plannerOpts);
+% 
+% startNodeIdx = nodeMeta.candidateStartNodeIdx(initResult.bestWaypointIdx);
+% goalIdx = 1:size(goalPoints, 1);
+% startXY = candidateStarts(initResult.bestWaypointIdx, :);
+% visitedStartMask = all(goalPoints == startXY, 2) & ...
+%     vecnorm(goalPoints - initResult.bestPose(1:2)', 2, 2) <= opts.closeEnough;
+% remainingGoalIdx = goalIdx(~visitedStartMask);
+% 
+% if isempty(remainingGoalIdx)
+%     plannedWaypoints = zeros(0, 2);
+%     return;
+% end
+% 
+% remainingGoalNodeIdx = nodeMeta.goalNodeIdx(remainingGoalIdx);
+% [~, visitGoalOrder, totalCost] = solveGlobalVisitOrder(costMatrix, startNodeIdx, remainingGoalNodeIdx);
+% if isempty(visitGoalOrder)
+%     warning('finalCompetition:GlobalPlanningFailed', ...
+%         'Global planning failed; falling back to stored target order.');
+%     return;
+% end
+% 
+% plannedWaypoints = goalPoints(remainingGoalIdx(visitGoalOrder), :);
+% fprintf('Global planning cost: %.3f over %d remaining goals.\n', totalCost, size(plannedWaypoints, 1));
+% end
+
+function plannedWaypoints = localBuildPlannedOrder(currentNavMap, currentStartXY, goalPoints, opts, stayAwayPoints, boundary)
+% LOCALBUILDPLANNEDORDER Dynamically compute the optimal visit order for remaining goals.
+%
+%   plannedWaypoints = localBuildPlannedOrder(currentNavMap, currentStartXY, ...
+%                                            goalPoints, opts, stayAwayPoints, boundary)
+%
+%   This updated version works both at initialization and mid-competition 
+%   after optional walls are confirmed.
+
 plannedWaypoints = goalPoints;
 
 if isempty(goalPoints)
     return;
 end
 
-stayAwayPoints = zeros(0, 2);
-if isfield(mapStruct, 'stayAwayPoints')
-    stayAwayPoints = mapStruct.stayAwayPoints;
-end
-
-boundary = [min(mapStruct.map(:, [1, 3]), [], 'all'), ...
-            min(mapStruct.map(:, [2, 4]), [], 'all'), ...
-            max(mapStruct.map(:, [1, 3]), [], 'all'), ...
-            max(mapStruct.map(:, [2, 4]), [], 'all')];
-
+% 1. Setup Planner Options for Global Cost Calculation
 plannerOpts = struct( ...
     'plannerType', opts.globalPlannerType, ...
     'boundary', boundary, ...
@@ -546,31 +674,35 @@ plannerOpts = struct( ...
     'maxShortcutLength', opts.maxShortcutLength, ...
     'nPRM', 150);
 
-    [~, costMatrix, ~, nodeMeta] = precomputePairwisePathCosts( ...
-        mapStruct.map, candidateStarts, goalPoints, plannerOpts);
+% 2. Precompute Pairwise Path Costs
+% We treat the robot's current position as the ONLY 'candidate start'
+candidateStarts = currentStartXY; % Should be 1x2
 
-startNodeIdx = nodeMeta.candidateStartNodeIdx(initResult.bestWaypointIdx);
+[~, costMatrix, ~, nodeMeta] = precomputePairwisePathCosts( ...
+    currentNavMap, candidateStarts, goalPoints, plannerOpts);
+
+% The robot's current position is now the first node in the cost matrix
+startNodeIdx = nodeMeta.candidateStartNodeIdx(1); 
+
+% All goal points are targets
 goalIdx = 1:size(goalPoints, 1);
-startXY = candidateStarts(initResult.bestWaypointIdx, :);
-visitedStartMask = all(goalPoints == startXY, 2) & ...
-    vecnorm(goalPoints - initResult.bestPose(1:2)', 2, 2) <= opts.closeEnough;
-remainingGoalIdx = goalIdx(~visitedStartMask);
+remainingGoalNodeIdx = nodeMeta.goalNodeIdx(goalIdx);
 
-if isempty(remainingGoalIdx)
-    plannedWaypoints = zeros(0, 2);
-    return;
-end
-
-remainingGoalNodeIdx = nodeMeta.goalNodeIdx(remainingGoalIdx);
+% 3. Solve the TSP
+% This finds the shortest sequence to visit all remaining goals
 [~, visitGoalOrder, totalCost] = solveGlobalVisitOrder(costMatrix, startNodeIdx, remainingGoalNodeIdx);
+
 if isempty(visitGoalOrder)
-    warning('finalCompetition:GlobalPlanningFailed', ...
-        'Global planning failed; falling back to stored target order.');
+    warning('Global planning failed to find a valid TSP tour. Keeping current order.');
     return;
 end
 
-plannedWaypoints = goalPoints(remainingGoalIdx(visitGoalOrder), :);
-fprintf('Global planning cost: %.3f over %d remaining goals.\n', totalCost, size(plannedWaypoints, 1));
+% 4. Reorder the waypoints
+plannedWaypoints = goalPoints(visitGoalOrder, :);
+
+fprintf('Global Re-planning: Optimized order for %d remaining goals. Total est. cost: %.3f m\n', ...
+    size(plannedWaypoints, 1), totalCost);
+
 end
 
 function waypoints = localResolveFinalTargets(mapStruct)
