@@ -16,6 +16,9 @@ end
 zDepth = zDepth(:);
 [dKnown, ~] = depthPredictWithHits(robotPose, knownMap, sensorOrigin, angles, opts.maxRange);
 [dOpt, hitOpt] = depthPredictWithHits(robotPose, optWalls, sensorOrigin, angles, opts.maxRange);
+presentEvidence = false(size(wallBeliefs));
+absentEvidence = false(size(wallBeliefs));
+hasObservation = false(size(wallBeliefs));
 
 for k = 1:min(length(zDepth), length(angles))
     wallIdx = hitOpt(k);
@@ -35,22 +38,52 @@ for k = 1:min(length(zDepth), length(angles))
     if dKnown(k) < dOpt(k) - opts.occlusionMargin
         continue;
     end
+    hasObservation(wallIdx) = true;
 
     residual = z - dOpt(k);
     if abs(residual) <= opts.presentTolerance
-        delta = opts.presentLogOdds;
+        knownAlsoExplainsMeasurement = isfinite(dKnown(k)) && ...
+            abs(z - dKnown(k)) <= opts.knownAmbiguityTolerance && ...
+            abs(dKnown(k) - dOpt(k)) <= opts.knownAmbiguityRange;
+        if ~knownAlsoExplainsMeasurement
+            presentEvidence(wallIdx) = true;
+        end
     elseif residual >= opts.absentTolerance
+        knownBackgroundVisible = isfinite(dKnown(k)) && dKnown(k) < opts.maxRange && ...
+            dKnown(k) > dOpt(k) + opts.absentTolerance && abs(z - dKnown(k)) <= opts.backgroundTolerance;
+        maxRangeBackgroundVisible = z >= min(opts.maxReliableRange, opts.maxRange) - opts.maxRangeTolerance;
+        if knownBackgroundVisible || maxRangeBackgroundVisible
+            absentEvidence(wallIdx) = true;
+        end
+    end
+end
+
+for wallIdx = 1:numel(wallBeliefs)
+    if opts.lockConfirmedWalls && ~strcmp(wallBeliefs(wallIdx).status, 'unknown')
+        continue;
+    end
+    if ~hasObservation(wallIdx)
+        continue;
+    end
+
+    oldStatus = wallBeliefs(wallIdx).status;
+    if presentEvidence(wallIdx) && ~absentEvidence(wallIdx)
+        wallBeliefs(wallIdx).presentEvidenceCount = wallBeliefs(wallIdx).presentEvidenceCount + 1;
+        wallBeliefs(wallIdx).absentEvidenceCount = max(0, wallBeliefs(wallIdx).absentEvidenceCount - 1);
+        delta = opts.presentLogOdds;
+    elseif absentEvidence(wallIdx) && ~presentEvidence(wallIdx)
+        wallBeliefs(wallIdx).absentEvidenceCount = wallBeliefs(wallIdx).absentEvidenceCount + 1;
+        wallBeliefs(wallIdx).presentEvidenceCount = max(0, wallBeliefs(wallIdx).presentEvidenceCount - 1);
         delta = -opts.absentLogOdds;
     else
         continue;
     end
 
-    oldStatus = wallBeliefs(wallIdx).status;
-    wallBeliefs(wallIdx).logOdds = max(min( ...
-        wallBeliefs(wallIdx).logOdds + delta, opts.maxLogOdds), -opts.maxLogOdds);
+    wallBeliefs(wallIdx).logOdds = max(min(wallBeliefs(wallIdx).logOdds + delta, ...
+        opts.maxLogOdds), -opts.maxLogOdds);
     wallBeliefs(wallIdx).probPresent = 1 / (1 + exp(-wallBeliefs(wallIdx).logOdds));
     wallBeliefs(wallIdx).observationCount = wallBeliefs(wallIdx).observationCount + 1;
-    wallBeliefs(wallIdx).status = localStatus(wallBeliefs(wallIdx).probPresent, opts);
+    wallBeliefs(wallIdx).status = localStatus(wallBeliefs(wallIdx), opts);
 
     if ~strcmp(oldStatus, wallBeliefs(wallIdx).status)
         changed = true;
@@ -74,16 +107,28 @@ if ~isfield(opts, 'occlusionMargin')
     opts.occlusionMargin = 0.05;
 end
 if ~isfield(opts, 'presentTolerance')
-    opts.presentTolerance = 0.18;
+    opts.presentTolerance = 0.12;
 end
 if ~isfield(opts, 'absentTolerance')
-    opts.absentTolerance = 0.28;
+    opts.absentTolerance = 0.35;
+end
+if ~isfield(opts, 'backgroundTolerance')
+    opts.backgroundTolerance = 0.25;
+end
+if ~isfield(opts, 'knownAmbiguityTolerance')
+    opts.knownAmbiguityTolerance = 0.18;
+end
+if ~isfield(opts, 'knownAmbiguityRange')
+    opts.knownAmbiguityRange = 0.30;
+end
+if ~isfield(opts, 'maxRangeTolerance')
+    opts.maxRangeTolerance = 0.10;
 end
 if ~isfield(opts, 'presentLogOdds')
-    opts.presentLogOdds = 1.1;
+    opts.presentLogOdds = 0.7;
 end
 if ~isfield(opts, 'absentLogOdds')
-    opts.absentLogOdds = 0.8;
+    opts.absentLogOdds = 0.55;
 end
 if ~isfield(opts, 'presentThreshold')
     opts.presentThreshold = 0.85;
@@ -97,12 +142,20 @@ end
 if ~isfield(opts, 'lockConfirmedWalls')
     opts.lockConfirmedWalls = true;
 end
+if ~isfield(opts, 'minPresentEvidence')
+    opts.minPresentEvidence = 3;
+end
+if ~isfield(opts, 'minAbsentEvidence')
+    opts.minAbsentEvidence = 3;
+end
 end
 
-function status = localStatus(probPresent, opts)
-if probPresent >= opts.presentThreshold
+function status = localStatus(wallBelief, opts)
+if wallBelief.probPresent >= opts.presentThreshold && ...
+        wallBelief.presentEvidenceCount >= opts.minPresentEvidence
     status = 'present';
-elseif probPresent <= opts.absentThreshold
+elseif wallBelief.probPresent <= opts.absentThreshold && ...
+        wallBelief.absentEvidenceCount >= opts.minAbsentEvidence
     status = 'absent';
 else
     status = 'unknown';

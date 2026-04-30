@@ -14,19 +14,36 @@ angles = 0;
 
 opts = struct('presentThreshold', 0.70, 'absentThreshold', 0.35, ...
     'presentTolerance', 0.15, 'absentTolerance', 0.25, ...
-    'maxReliableRange', 1.0);
+    'backgroundTolerance', 0.30, 'maxReliableRange', 1.0, ...
+    'minPresentEvidence', 3, 'minAbsentEvidence', 3);
 
 wallBeliefs = initWallBeliefs(optWalls);
+for i = 1:2
+    [wallBeliefs, changed, presentChanged, absentChanged] = updateWallBeliefs( ...
+        pose, 1.0, knownMap, optWalls, wallBeliefs, sensorOrigin, angles, opts);
+    assert(~changed);
+    assert(~presentChanged);
+    assert(~absentChanged);
+    assert(strcmp(wallBeliefs(1).status, 'unknown'));
+end
 [wallBeliefs, changed, presentChanged, absentChanged] = updateWallBeliefs( ...
-    pose, 1.0, knownMap, optWalls, wallBeliefs, sensorOrigin, angles, opts);
+        pose, 1.0, knownMap, optWalls, wallBeliefs, sensorOrigin, angles, opts);
 assert(changed);
 assert(presentChanged);
 assert(~absentChanged);
 assert(strcmp(wallBeliefs(1).status, 'present'));
 
 wallBeliefs = initWallBeliefs(optWalls);
+for i = 1:2
+    [wallBeliefs, changed, presentChanged, absentChanged] = updateWallBeliefs( ...
+        pose, 3.0, knownMap, optWalls, wallBeliefs, sensorOrigin, angles, opts);
+    assert(~changed);
+    assert(~presentChanged);
+    assert(~absentChanged);
+    assert(strcmp(wallBeliefs(1).status, 'unknown'));
+end
 [wallBeliefs, changed, presentChanged, absentChanged] = updateWallBeliefs( ...
-    pose, 3.0, knownMap, optWalls, wallBeliefs, sensorOrigin, angles, opts);
+        pose, 3.0, knownMap, optWalls, wallBeliefs, sensorOrigin, angles, opts);
 assert(changed);
 assert(~presentChanged);
 assert(absentChanged);
@@ -45,6 +62,17 @@ wallBeliefs = initWallBeliefs(optWalls);
 assert(~changed);
 assert(strcmp(wallBeliefs(1).status, 'unknown'));
 
+nearBehindKnown = [2.08, -1, 2.08, 1];
+wallBeliefs = initWallBeliefs(optWalls);
+for i = 1:3
+    [wallBeliefs, changed, presentChanged, absentChanged] = updateWallBeliefs( ...
+        pose, 1.08, nearBehindKnown, optWalls, wallBeliefs, sensorOrigin, angles, opts);
+    assert(~changed);
+    assert(~presentChanged);
+    assert(~absentChanged);
+    assert(strcmp(wallBeliefs(1).status, 'unknown'));
+end
+
 wallBeliefs = initWallBeliefs(optWalls);
 [wallBeliefs, changed, presentChanged, absentChanged] = updateWallBeliefs( ...
     [0; 0; 0], 2.0, knownMap, optWalls, wallBeliefs, sensorOrigin, angles, opts);
@@ -62,8 +90,10 @@ assert(size(navMap, 1) == size(knownMap, 1));
 assert(size(plotData.unknown, 1) == 1);
 
 wallBeliefs = initWallBeliefs(optWalls);
-[wallBeliefs, ~] = updateWallBeliefs( ...
-    pose, 1.0, knownMap, optWalls, wallBeliefs, sensorOrigin, angles, opts);
+for i = 1:3
+    [wallBeliefs, ~] = updateWallBeliefs( ...
+        pose, 1.0, knownMap, optWalls, wallBeliefs, sensorOrigin, angles, opts);
+end
 [navMap, plotData] = buildActiveNavMap(knownMap, optWalls, wallBeliefs);
 assert(size(navMap, 1) == size(knownMap, 1) + 1);
 assert(size(plotData.present, 1) == 1);
