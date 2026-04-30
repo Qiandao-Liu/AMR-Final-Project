@@ -209,7 +209,7 @@ if ~isfield(opts, 'activeNavMapMode')
     opts.activeNavMapMode = 'confirmed';
 end
 if ~isfield(opts, 'activeSenseReliableRange')
-    opts.activeSenseReliableRange = 4.0;
+    opts.activeSenseReliableRange = 1.0;
 end
 if ~isfield(opts, 'activeSenseSafetyEnabled')
     opts.activeSenseSafetyEnabled = false;
@@ -427,7 +427,7 @@ while toc < opts.maxTime
 
     beliefOpts = struct( ...
         'maxReliableRange', opts.activeSenseReliableRange);
-    [wallBeliefs, wallStatusChanged] = updateWallBeliefs( ...
+    [wallBeliefs, ~, wallPresentChanged, wallAbsentChanged] = updateWallBeliefs( ...
         poseCtrl, latestDepth, map, optWalls, wallBeliefs, opts.sensorOrigin, angles, beliefOpts);
     [navMap, activePlotData] = buildActiveNavMap(map, optWalls, wallBeliefs, opts.activeNavMapMode);
     result.wallBeliefs = wallBeliefs;
@@ -435,10 +435,14 @@ while toc < opts.maxTime
     dataStore.wallBeliefs = wallBeliefs;
     dataStore.activeNavMap = navMap;
 
-    if wallStatusChanged
+    if wallAbsentChanged
+        fprintf('Active sensing marked an optional wall absent; no replan needed.\n');
+    end
+
+    if wallPresentChanged
         SetFwdVelAngVelCreate(Robot, 0, 0);
         pause(opts.loopPause);
-        fprintf('Active sensing changed optional-wall status; replanning remaining goals.\n');
+        fprintf('Active sensing confirmed optional wall present; replanning remaining goals.\n');
         remainingGoals = plannedWaypoints(targetIdx:end, :);
         plannedWaypoints = localReorderRemainingWaypoints( ...
             navMap, boundary, poseCtrl, result.visitedWaypoints, remainingGoals, stayAwayPoints, opts);

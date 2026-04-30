@@ -1,4 +1,4 @@
-function [wallBeliefs, changed] = updateWallBeliefs(robotPose, zDepth, knownMap, optWalls, wallBeliefs, sensorOrigin, angles, opts)
+function [wallBeliefs, changed, presentChanged, absentChanged] = updateWallBeliefs(robotPose, zDepth, knownMap, optWalls, wallBeliefs, sensorOrigin, angles, opts)
 % UPDATEWALLBELIEFS Update optional-wall status from RealSense depth.
 
 if nargin < 8
@@ -7,6 +7,8 @@ end
 opts = localDefaults(opts);
 
 changed = false;
+presentChanged = false;
+absentChanged = false;
 if isempty(optWalls) || isempty(wallBeliefs)
     return;
 end
@@ -52,6 +54,11 @@ for k = 1:min(length(zDepth), length(angles))
 
     if ~strcmp(oldStatus, wallBeliefs(wallIdx).status)
         changed = true;
+        if strcmp(wallBeliefs(wallIdx).status, 'present')
+            presentChanged = true;
+        elseif strcmp(wallBeliefs(wallIdx).status, 'absent')
+            absentChanged = true;
+        end
     end
 end
 end
@@ -61,7 +68,7 @@ if ~isfield(opts, 'maxRange')
     opts.maxRange = 10.0;
 end
 if ~isfield(opts, 'maxReliableRange')
-    opts.maxReliableRange = 4.0;
+    opts.maxReliableRange = 1.0;
 end
 if ~isfield(opts, 'occlusionMargin')
     opts.occlusionMargin = 0.05;

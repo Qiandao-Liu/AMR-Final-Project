@@ -13,22 +13,29 @@ sensorOrigin = [0; 0];
 angles = 0;
 
 opts = struct('presentThreshold', 0.70, 'absentThreshold', 0.35, ...
-    'presentTolerance', 0.15, 'absentTolerance', 0.25);
+    'presentTolerance', 0.15, 'absentTolerance', 0.25, ...
+    'maxReliableRange', 1.0);
 
 wallBeliefs = initWallBeliefs(optWalls);
-[wallBeliefs, changed] = updateWallBeliefs( ...
+[wallBeliefs, changed, presentChanged, absentChanged] = updateWallBeliefs( ...
     pose, 1.0, knownMap, optWalls, wallBeliefs, sensorOrigin, angles, opts);
 assert(changed);
+assert(presentChanged);
+assert(~absentChanged);
 assert(strcmp(wallBeliefs(1).status, 'present'));
 
 wallBeliefs = initWallBeliefs(optWalls);
-[wallBeliefs, changed] = updateWallBeliefs( ...
+[wallBeliefs, changed, presentChanged, absentChanged] = updateWallBeliefs( ...
     pose, 3.0, knownMap, optWalls, wallBeliefs, sensorOrigin, angles, opts);
 assert(changed);
+assert(~presentChanged);
+assert(absentChanged);
 assert(strcmp(wallBeliefs(1).status, 'absent'));
-[wallBeliefs, changed] = updateWallBeliefs( ...
+[wallBeliefs, changed, presentChanged, absentChanged] = updateWallBeliefs( ...
     pose, 1.0, knownMap, optWalls, wallBeliefs, sensorOrigin, angles, opts);
 assert(~changed);
+assert(~presentChanged);
+assert(~absentChanged);
 assert(strcmp(wallBeliefs(1).status, 'absent'));
 
 occludingKnown = [1.5, -0.5, 1.5, 0.5];
@@ -36,6 +43,14 @@ wallBeliefs = initWallBeliefs(optWalls);
 [wallBeliefs, changed] = updateWallBeliefs( ...
     pose, 1.5, occludingKnown, optWalls, wallBeliefs, sensorOrigin, angles, opts);
 assert(~changed);
+assert(strcmp(wallBeliefs(1).status, 'unknown'));
+
+wallBeliefs = initWallBeliefs(optWalls);
+[wallBeliefs, changed, presentChanged, absentChanged] = updateWallBeliefs( ...
+    [0; 0; 0], 2.0, knownMap, optWalls, wallBeliefs, sensorOrigin, angles, opts);
+assert(~changed);
+assert(~presentChanged);
+assert(~absentChanged);
 assert(strcmp(wallBeliefs(1).status, 'unknown'));
 
 [navMap, plotData] = buildActiveNavMap(knownMap, optWalls, wallBeliefs, 'conservative');
