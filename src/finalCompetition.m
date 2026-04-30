@@ -121,7 +121,7 @@ if ~isfield(opts, 'planResolution')
     opts.planResolution = 0.10;
 end
 if ~isfield(opts, 'robotInflation')
-    opts.robotInflation = 0.22;
+    opts.robotInflation = 0.26;
 end
 if ~isfield(opts, 'stayAwayInflation')
     opts.stayAwayInflation = 0.25;
@@ -339,10 +339,14 @@ while toc < opts.maxTime
         processNoise = localScaledProcessNoise(latestOdom, opts);
     end
 
+    currentMeasNoise = opts.measurementNoise;
+    if abs(latestOdom(2)) > 0.1 || abs(cmdW) > 0.2
+        currentMeasNoise = opts.measurementNoise * 5;
+    end
     [state, particlesPre] = localizeStepPF( ...
         state, latestOdom, latestDepth, currentNavMap, opts.sensorOrigin, angles, ...
         struct('processNoise', processNoise, ...
-               'measurementNoise', opts.measurementNoise, ...
+               'measurementNoise', currentMeasNoise, ...
                'tags', tags, ...
                'beaconLoc', beaconLoc, ...
                'beaconSigma', opts.beaconSigma, ...
@@ -393,8 +397,9 @@ while toc < opts.maxTime
             else % position and orientation are correct, taking measurements
                 fprintf('Mapping: Robot oriented. Measuring wall...\n');
                 SetFwdVelAngVelCreate(Robot, 0, 0);
-                pause(0.8);
+                pause(1.0);
         
+                dataStore = localReadSensors(Robot, dataStore);
                 latestDepth = dataStore.rsdepth(end, 2:end)';
                 isPresent = verifyWallPresence(latestDepth);
 
