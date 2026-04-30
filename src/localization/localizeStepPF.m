@@ -51,12 +51,27 @@ end
 if ~isfield(opts, 'beaconSensorOrigin')
     opts.beaconSensorOrigin = [0; 0];
 end
+if ~isfield(opts, 'wallCrossingGate')
+    opts.wallCrossingGate = true;
+end
+if ~isfield(opts, 'wallCrossingPenalty')
+    opts.wallCrossingPenalty = 1e-6;
+end
+if ~isfield(opts, 'wallCrossingMap')
+    opts.wallCrossingMap = map;
+end
 
 g = @(pose, u) integrateOdom(pose, u(1), u(2));
 h = @(pose) depthPredict(pose, map, sensorOrigin, angles, 10.0);
 
+previousParticles = state.particles;
 [state.particles, particlesPre] = PF( ...
     state.particles, odom, zDepth, g, h, opts.processNoise, opts.measurementNoise);
+
+if opts.wallCrossingGate && ~isempty(opts.wallCrossingMap)
+    particlesPre = applyWallCrossingGate(previousParticles, particlesPre, opts.wallCrossingMap, opts.wallCrossingPenalty);
+    state.particles = resampleParticles(particlesPre);
+end
 
 % If beacons are visible, apply an additional reweighting step using the
 % tag-relative positions. If no beacons are visible, keep the depth-only PF.
@@ -94,6 +109,42 @@ state.poseEstimate = [ ...
     sum(w .* p(1, :)); ...
     sum(w .* p(2, :)); ...
     atan2(sum(w .* sin(p(3, :))), sum(w .* cos(p(3, :))))];
+end
+
+function particlesPre = applyWallCrossingGate(previousParticles, particlesPre, wallMap, crossingPenalty)
+numParticles = size(particlesPre.poses, 2);
+weights = particlesPre.weights;
+
+for i = 1:numParticles
+    if localSegmentCrossesWall(previousParticles.poses(1:2, i)', particlesPre.poses(1:2, i)', wallMap)
+        weights(i) = weights(i) * crossingPenalty;
+    end
+end
+
+weightSum = sum(weights);
+if isfinite(weightSum) && weightSum > 0
+    particlesPre.weights = weights / weightSum;
+end
+end
+
+function crosses = localSegmentCrossesWall(p1, p2, wallMap)
+crosses = false;
+if norm(p2 - p1) < 1e-6
+    return;
+end
+
+for i = 1:size(wallMap, 1)
+    [isect, xInt, yInt] = intersectPoint( ...
+        p1(1), p1(2), p2(1), p2(2), ...
+        wallMap(i, 1), wallMap(i, 2), wallMap(i, 3), wallMap(i, 4));
+    if isect
+        hitPoint = [xInt, yInt];
+        if norm(hitPoint - p1) > 1e-5 && norm(hitPoint - p2) > 1e-5
+            crosses = true;
+            return;
+        end
+    end
+end
 end
 
 function particles = resampleParticles(particlesPre)
