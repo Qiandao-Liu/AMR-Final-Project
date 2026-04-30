@@ -60,6 +60,28 @@ end
 if ~isfield(opts, 'wallCrossingMap')
     opts.wallCrossingMap = map;
 end
+if ~isfield(opts, 'depthBeamIndices')
+    opts.depthBeamIndices = [];
+end
+if ~isfield(opts, 'wallCrossingMinStep')
+    opts.wallCrossingMinStep = 0.01;
+end
+
+if ~isempty(opts.depthBeamIndices)
+    beamIdx = opts.depthBeamIndices(:);
+    beamIdx = beamIdx(beamIdx >= 1 & beamIdx <= min(numel(zDepth), numel(angles)));
+    if ~isempty(beamIdx)
+        zDepth = zDepth(beamIdx);
+        angles = angles(beamIdx);
+        if isscalar(opts.measurementNoise)
+            opts.measurementNoise = opts.measurementNoise * eye(numel(beamIdx));
+        elseif size(opts.measurementNoise, 1) >= max(beamIdx) && size(opts.measurementNoise, 2) >= max(beamIdx)
+            opts.measurementNoise = opts.measurementNoise(beamIdx, beamIdx);
+        else
+            opts.measurementNoise = opts.measurementNoise(1:numel(beamIdx), 1:numel(beamIdx));
+        end
+    end
+end
 
 g = @(pose, u) integrateOdom(pose, u(1), u(2));
 h = @(pose) depthPredict(pose, map, sensorOrigin, angles, 10.0);
@@ -69,7 +91,9 @@ previousParticles = state.particles;
     state.particles, odom, zDepth, g, h, opts.processNoise, opts.measurementNoise);
 
 if opts.wallCrossingGate && ~isempty(opts.wallCrossingMap)
-    particlesPre = applyWallCrossingGate(previousParticles, particlesPre, opts.wallCrossingMap, opts.wallCrossingPenalty);
+    particlesPre = applyWallCrossingGate( ...
+        previousParticles, particlesPre, opts.wallCrossingMap, ...
+        opts.wallCrossingPenalty, opts.wallCrossingMinStep);
     state.particles = resampleParticles(particlesPre);
 end
 
@@ -111,11 +135,14 @@ state.poseEstimate = [ ...
     atan2(sum(w .* sin(p(3, :))), sum(w .* cos(p(3, :))))];
 end
 
-function particlesPre = applyWallCrossingGate(previousParticles, particlesPre, wallMap, crossingPenalty)
+function particlesPre = applyWallCrossingGate(previousParticles, particlesPre, wallMap, crossingPenalty, minStep)
 numParticles = size(particlesPre.poses, 2);
 weights = particlesPre.weights;
 
 for i = 1:numParticles
+    if norm(particlesPre.poses(1:2, i) - previousParticles.poses(1:2, i)) < minStep
+        continue;
+    end
     if localSegmentCrossesWall(previousParticles.poses(1:2, i)', particlesPre.poses(1:2, i)', wallMap)
         weights(i) = weights(i) * crossingPenalty;
     end

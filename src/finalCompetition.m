@@ -215,7 +215,7 @@ if ~isfield(opts, 'showWindow')
     opts.showWindow = true;
 end
 if ~isfield(opts, 'controlPoseAlpha')
-    opts.controlPoseAlpha = 0.20;
+    opts.controlPoseAlpha = 0.32;
 end
 if ~isfield(opts, 'controlPoseAlphaWithTags')
     opts.controlPoseAlphaWithTags = 0.35;
@@ -240,6 +240,12 @@ if ~isfield(opts, 'pfReseedPositionSigma')
 end
 if ~isfield(opts, 'pfReseedThetaSigma')
     opts.pfReseedThetaSigma = 15 * pi / 180;
+end
+if ~isfield(opts, 'pfDepthBeamIndices')
+    opts.pfDepthBeamIndices = [1, 3, 5, 6, 8, 10];
+end
+if ~isfield(opts, 'pfWallCrossingMinStep')
+    opts.pfWallCrossingMinStep = 0.015;
 end
 if ~isfield(opts, 'tagSnapAlpha')
     opts.tagSnapAlpha = 0.65;
@@ -273,6 +279,66 @@ if ~isfield(opts, 'activeSenseUnexpectedMargin')
 end
 if ~isfield(opts, 'activeSenseReplanCooldown')
     opts.activeSenseReplanCooldown = 5;
+end
+if ~isfield(opts, 'activeSensePresentMinEvidence')
+    opts.activeSensePresentMinEvidence = 2;
+end
+if ~isfield(opts, 'activeSenseAbsentMinEvidence')
+    opts.activeSenseAbsentMinEvidence = 5;
+end
+if ~isfield(opts, 'activeSensePresentMinBeams')
+    opts.activeSensePresentMinBeams = 2;
+end
+if ~isfield(opts, 'activeSenseAbsentMinBeams')
+    opts.activeSenseAbsentMinBeams = 3;
+end
+if ~isfield(opts, 'activeSensePresentMinCoverage')
+    opts.activeSensePresentMinCoverage = 0.10;
+end
+if ~isfield(opts, 'activeSenseAbsentMinCoverage')
+    opts.activeSenseAbsentMinCoverage = 0.20;
+end
+if ~isfield(opts, 'activeSensePresentSupportRatio')
+    opts.activeSensePresentSupportRatio = 0.50;
+end
+if ~isfield(opts, 'activeSenseAbsentSupportRatio')
+    opts.activeSenseAbsentSupportRatio = 0.70;
+end
+if ~isfield(opts, 'activeSensePresentLogOdds')
+    opts.activeSensePresentLogOdds = 1.2;
+end
+if ~isfield(opts, 'activeSensePresentThreshold')
+    opts.activeSensePresentThreshold = 0.75;
+end
+if ~isfield(opts, 'activeSenseMaxPFSpreadForUpdate')
+    opts.activeSenseMaxPFSpreadForUpdate = 0.22;
+end
+if ~isfield(opts, 'activeSenseMinNeffForUpdate')
+    opts.activeSenseMinNeffForUpdate = 25;
+end
+if ~isfield(opts, 'activeSenseUnknownWallSlowdownEnabled')
+    opts.activeSenseUnknownWallSlowdownEnabled = true;
+end
+if ~isfield(opts, 'activeSenseUnknownWallSlowRange')
+    opts.activeSenseUnknownWallSlowRange = 0.90;
+end
+if ~isfield(opts, 'activeSenseUnknownWallSlowSpeed')
+    opts.activeSenseUnknownWallSlowSpeed = 0.08;
+end
+if ~isfield(opts, 'bumpOptionalWallEnabled')
+    opts.bumpOptionalWallEnabled = true;
+end
+if ~isfield(opts, 'bumpOptionalWallMatchDistance')
+    opts.bumpOptionalWallMatchDistance = 0.28;
+end
+if ~isfield(opts, 'bumpKnownWallRejectMargin')
+    opts.bumpKnownWallRejectMargin = 0.05;
+end
+if ~isfield(opts, 'bumpContactForwardOffset')
+    opts.bumpContactForwardOffset = 0.17;
+end
+if ~isfield(opts, 'bumpContactSideOffset')
+    opts.bumpContactSideOffset = 0.10;
 end
 
 angles = linspace(27 * pi / 180, -27 * pi / 180, 10)';
@@ -331,6 +397,7 @@ prevCmdWSign = 0;
 handoffPending = false;
 handoffActive = false;
 handoffStepCount = 0;
+lastProcessedBumpTime = -inf;
 
 fig = [];
 if opts.showWindow
@@ -448,7 +515,9 @@ while toc < opts.maxTime
                'beaconSigma', opts.beaconSigma, ...
                'beaconWeightFactor', opts.beaconWeightFactor, ...
                'beaconSensorOrigin', opts.beaconSensorOrigin, ...
-               'wallCrossingMap', navMap));
+               'wallCrossingMap', navMap, ...
+               'depthBeamIndices', opts.pfDepthBeamIndices, ...
+               'wallCrossingMinStep', opts.pfWallCrossingMinStep));
 
     [pfSpread, neff] = localPFHealth(particlesPre);
     poseEst = state.poseEstimate;
@@ -472,14 +541,39 @@ while toc < opts.maxTime
     end
 
     beliefOpts = struct( ...
-        'maxReliableRange', opts.activeSenseReliableRange);
+        'maxReliableRange', opts.activeSenseReliableRange, ...
+        'usePFConfidenceGate', true, ...
+        'pfSpread', pfSpread, ...
+        'neff', neff, ...
+        'pfMaxSpreadForUpdate', opts.activeSenseMaxPFSpreadForUpdate, ...
+        'pfMinNeffForUpdate', opts.activeSenseMinNeffForUpdate, ...
+        'minPresentEvidence', opts.activeSensePresentMinEvidence, ...
+        'minAbsentEvidence', opts.activeSenseAbsentMinEvidence, ...
+        'minPresentFrameBeams', opts.activeSensePresentMinBeams, ...
+        'minAbsentFrameBeams', opts.activeSenseAbsentMinBeams, ...
+        'minPresentWallCoverage', opts.activeSensePresentMinCoverage, ...
+        'minAbsentWallCoverage', opts.activeSenseAbsentMinCoverage, ...
+        'presentSupportRatio', opts.activeSensePresentSupportRatio, ...
+        'absentSupportRatio', opts.activeSenseAbsentSupportRatio, ...
+        'presentLogOdds', opts.activeSensePresentLogOdds, ...
+        'presentThreshold', opts.activeSensePresentThreshold);
     [wallBeliefs, ~, wallPresentChanged, wallAbsentChanged] = updateWallBeliefs( ...
         poseCtrl, latestDepth, map, optWalls, wallBeliefs, opts.sensorOrigin, angles, beliefOpts);
+    [wallBeliefs, bumpPresentChanged, bumpedWallIdx, lastProcessedBumpTime] = ...
+        localApplyBumpOptionalWallCorrection( ...
+            poseCtrl, dataStore.bump, lastProcessedBumpTime, map, optWalls, wallBeliefs, opts);
+    wallPresentChanged = wallPresentChanged || bumpPresentChanged;
     [navMap, activePlotData] = buildActiveNavMap(map, optWalls, wallBeliefs, opts.activeNavMapMode);
     result.wallBeliefs = wallBeliefs;
     result.activePlotData = activePlotData;
     dataStore.wallBeliefs = wallBeliefs;
     dataStore.activeNavMap = navMap;
+    unknownOptionalWallAhead = localUnknownOptionalWallAhead( ...
+        poseCtrl, optWalls, wallBeliefs, opts.sensorOrigin, angles, opts);
+
+    if bumpPresentChanged
+        fprintf('Bump near optional wall %d; overriding belief to present.\n', bumpedWallIdx);
+    end
 
     if wallAbsentChanged
         fprintf('Active sensing marked an optional wall absent; no replan needed.\n');
@@ -661,6 +755,9 @@ while toc < opts.maxTime
         end
         if pfSpread > opts.pfSlowSpread || neff < opts.pfSlowNeff
             speedLimit = min(speedLimit, opts.desiredSpeedPoorPF);
+        end
+        if unknownOptionalWallAhead
+            speedLimit = min(speedLimit, opts.activeSenseUnknownWallSlowSpeed);
         end
         speed = speedLimit;
         if distToGoal <= opts.nearGoalSlowRadius
@@ -919,6 +1016,138 @@ end
 pathHeading = atan2(tangent(2), tangent(1));
 alphaPath = localWrapToPi(pathHeading - pose(3));
 hasPathHeading = true;
+end
+
+function ahead = localUnknownOptionalWallAhead(pose, optWalls, wallBeliefs, sensorOrigin, angles, opts)
+ahead = false;
+if ~opts.activeSenseUnknownWallSlowdownEnabled || isempty(optWalls) || isempty(wallBeliefs)
+    return;
+end
+
+unknownIdx = find(strcmp({wallBeliefs.status}, 'unknown'));
+if isempty(unknownIdx)
+    return;
+end
+
+[depths, hitIdx] = depthPredictWithHits( ...
+    pose, optWalls, sensorOrigin, angles, opts.activeSenseUnknownWallSlowRange);
+for i = 1:numel(depths)
+    if hitIdx(i) ~= 0 && any(hitIdx(i) == unknownIdx) && ...
+            isfinite(depths(i)) && depths(i) <= opts.activeSenseUnknownWallSlowRange
+        ahead = true;
+        return;
+    end
+end
+end
+
+function [wallBeliefs, presentChanged, wallIdx, lastBumpTime] = localApplyBumpOptionalWallCorrection( ...
+    pose, bumpData, lastBumpTime, knownMap, optWalls, wallBeliefs, opts)
+presentChanged = false;
+wallIdx = 0;
+
+if ~opts.bumpOptionalWallEnabled || isempty(bumpData) || isempty(optWalls) || isempty(wallBeliefs)
+    return;
+end
+
+latestBump = bumpData(end, :);
+bumpTime = latestBump(1);
+if bumpTime <= lastBumpTime
+    return;
+end
+lastBumpTime = bumpTime;
+
+bumpRight = latestBump(2) ~= 0;
+bumpLeft = latestBump(3) ~= 0;
+bumpFront = numel(latestBump) >= 7 && latestBump(7) ~= 0;
+if ~(bumpRight || bumpLeft || bumpFront)
+    return;
+end
+
+contactPoints = localBumpContactPoints(pose, bumpRight, bumpLeft, bumpFront, opts);
+if isempty(contactPoints)
+    return;
+end
+
+[bestWallIdx, bestOptDist, bestKnownDist] = localNearestOptionalWallForBump( ...
+    contactPoints, optWalls, knownMap);
+if bestWallIdx == 0 || bestOptDist > opts.bumpOptionalWallMatchDistance
+    return;
+end
+if isfinite(bestKnownDist) && bestKnownDist <= bestOptDist + opts.bumpKnownWallRejectMargin
+    return;
+end
+
+oldStatus = wallBeliefs(bestWallIdx).status;
+wallBeliefs(bestWallIdx).status = 'present';
+wallBeliefs(bestWallIdx).logOdds = max(wallBeliefs(bestWallIdx).logOdds, 6.0);
+wallBeliefs(bestWallIdx).probPresent = 1 / (1 + exp(-wallBeliefs(bestWallIdx).logOdds));
+wallBeliefs(bestWallIdx).presentEvidenceCount = max(wallBeliefs(bestWallIdx).presentEvidenceCount, 6);
+wallBeliefs(bestWallIdx).absentEvidenceCount = 0;
+wallBeliefs(bestWallIdx).observationCount = wallBeliefs(bestWallIdx).observationCount + 1;
+
+presentChanged = ~strcmp(oldStatus, 'present');
+wallIdx = bestWallIdx;
+end
+
+function contactPoints = localBumpContactPoints(pose, bumpRight, bumpLeft, bumpFront, opts)
+bodyPoints = zeros(0, 2);
+if bumpFront
+    bodyPoints(end + 1, :) = [opts.bumpContactForwardOffset, 0];
+end
+if bumpRight
+    bodyPoints(end + 1, :) = [opts.bumpContactForwardOffset, -opts.bumpContactSideOffset];
+end
+if bumpLeft
+    bodyPoints(end + 1, :) = [opts.bumpContactForwardOffset, opts.bumpContactSideOffset];
+end
+
+theta = pose(3);
+R = [cos(theta), -sin(theta); sin(theta), cos(theta)];
+contactPoints = (pose(1:2)' + bodyPoints * R');
+end
+
+function [bestWallIdx, bestOptDist, bestKnownDist] = localNearestOptionalWallForBump(contactPoints, optWalls, knownMap)
+bestWallIdx = 0;
+bestOptDist = inf;
+bestKnownDist = inf;
+
+for i = 1:size(contactPoints, 1)
+    p = contactPoints(i, :);
+    [optDist, optIdx] = localNearestSegmentDistance(p, optWalls);
+    [knownDist, ~] = localNearestSegmentDistance(p, knownMap);
+    if optDist < bestOptDist
+        bestOptDist = optDist;
+        bestWallIdx = optIdx;
+        bestKnownDist = knownDist;
+    end
+end
+end
+
+function [bestDist, bestIdx] = localNearestSegmentDistance(pointXY, segments)
+bestDist = inf;
+bestIdx = 0;
+for i = 1:size(segments, 1)
+    dist = localPointToSegmentDistance(pointXY, segments(i, :));
+    if dist < bestDist
+        bestDist = dist;
+        bestIdx = i;
+    end
+end
+end
+
+function dist = localPointToSegmentDistance(pointXY, segment)
+p = pointXY(:);
+a = segment(1:2)';
+b = segment(3:4)';
+ab = b - a;
+denom = dot(ab, ab);
+if denom <= 0
+    dist = norm(p - a);
+    return;
+end
+t = max(0, min(1, dot(p - a, ab) / denom));
+projection = a + t * ab;
+dist = norm(p - projection);
 end
 
 function visitGoalOrder = localGreedyVisitGoalOrder(costMatrix, startNodeIdx, remainingGoalNodeIdx)

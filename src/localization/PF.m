@@ -28,6 +28,11 @@ for i = 1:numParticles
 end
 
 logWeights = zeros(1, numParticles);
+useDiagonalQ = ismatrix(Q) && size(Q, 1) == size(Q, 2) && ...
+    all(abs(Q(~eye(size(Q)))) < 1e-12, 'all');
+if useDiagonalQ
+    qDiag = diag(Q);
+end
 
 for i = 1:numParticles
     zHat = h(predictedPoses(:, i));
@@ -39,8 +44,12 @@ for i = 1:numParticles
     end
 
     residual = z(valid) - zHat(valid);
-    Qv = Q(valid, valid);
-    logWeights(i) = -0.5 * (residual' * (Qv \ residual));
+    if useDiagonalQ
+        logWeights(i) = -0.5 * sum((residual .^ 2) ./ qDiag(valid));
+    else
+        Qv = Q(valid, valid);
+        logWeights(i) = -0.5 * (residual' * (Qv \ residual));
+    end
 end
 
 maxLogWeight = max(logWeights);
