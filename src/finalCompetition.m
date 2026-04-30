@@ -67,7 +67,7 @@ if ~isfield(opts, 'maxWheelVelocity')
     opts.maxWheelVelocity = 0.25;
 end
 if ~isfield(opts, 'sensorOrigin')
-    opts.sensorOrigin = [0; 0.08];
+    opts.sensorOrigin = [0.08; 0];
 end
 if ~isfield(opts, 'numParticles')
     opts.numParticles = 500;
@@ -340,7 +340,7 @@ while toc < opts.maxTime
     end
 
     currentMeasNoise = opts.measurementNoise;
-    if abs(latestOdom(2)) > 0.1 || abs(cmdW) > 0.2
+    if abs(latestOdom(2)) > 0.05
         currentMeasNoise = opts.measurementNoise * 5;
     end
     [state, particlesPre] = localizeStepPF( ...
