@@ -70,7 +70,7 @@ if ~isfield(opts, 'maxWheelVelocity')
     opts.maxWheelVelocity = 0.25;
 end
 if ~isfield(opts, 'sensorOrigin')
-    opts.sensorOrigin = [0.13; 0];
+    opts.sensorOrigin = [0.08; 0];
 end
 if ~isfield(opts, 'numParticles')
     opts.numParticles = 500;
