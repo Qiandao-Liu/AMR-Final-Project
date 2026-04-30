@@ -65,7 +65,7 @@ if ~isfield(opts, 'pfSlowNeff')
     opts.pfSlowNeff = 80;
 end
 if ~isfield(opts, 'maxForwardSpeed')
-    opts.maxForwardSpeed = 0.14;
+    opts.maxForwardSpeed = 0.16;
 end
 if ~isfield(opts, 'maxReverseSpeed')
     opts.maxReverseSpeed = 0.04;
@@ -131,7 +131,28 @@ if ~isfield(opts, 'purePursuitMinLookahead')
     opts.purePursuitMinLookahead = 0.25;
 end
 if ~isfield(opts, 'purePursuitMinHeadingScale')
-    opts.purePursuitMinHeadingScale = 0.45;
+    opts.purePursuitMinHeadingScale = 0.15;
+end
+if ~isfield(opts, 'purePursuitStopForwardAngle')
+    opts.purePursuitStopForwardAngle = 120 * pi / 180;
+end
+if ~isfield(opts, 'handoffAlignEnabled')
+    opts.handoffAlignEnabled = true;
+end
+if ~isfield(opts, 'handoffAlignAngle')
+    opts.handoffAlignAngle = 100 * pi / 180;
+end
+if ~isfield(opts, 'handoffReleaseAngle')
+    opts.handoffReleaseAngle = 35 * pi / 180;
+end
+if ~isfield(opts, 'handoffTurnSpeed')
+    opts.handoffTurnSpeed = 0.35;
+end
+if ~isfield(opts, 'handoffMaxSteps')
+    opts.handoffMaxSteps = 40;
+end
+if ~isfield(opts, 'handoffTangentMinDistance')
+    opts.handoffTangentMinDistance = 0.15;
 end
 if ~isfield(opts, 'lookaheadDistance')
     opts.lookaheadDistance = 0.45;
@@ -307,6 +328,9 @@ snakeCount = 0;
 snakeRecoveryCounter = 0;
 prevDistToGoal = inf;
 prevCmdWSign = 0;
+handoffPending = false;
+handoffActive = false;
+handoffStepCount = 0;
 
 fig = [];
 if opts.showWindow
@@ -474,6 +498,9 @@ while toc < opts.maxTime
         result.globalVisitOrder = result.remainingGoals;
         currentPath = zeros(0, 2);
         pathTargetIdx = 1;
+        handoffPending = opts.handoffAlignEnabled;
+        handoffActive = false;
+        handoffStepCount = 0;
         result.replanCount = result.replanCount + 1;
         activeReplanCooldown = opts.activeSenseReplanCooldown;
         continue;
@@ -508,6 +535,9 @@ while toc < opts.maxTime
         localSetPowerLED(Robot, 'green', opts);
         currentPath = zeros(0, 2);
         pathTargetIdx = 1;
+        handoffPending = opts.handoffAlignEnabled;
+        handoffActive = false;
+        handoffStepCount = 0;
         snakeCount = 0;
         snakeRecoveryCounter = 0;
         prevDistToGoal = inf;
@@ -545,6 +575,9 @@ while toc < opts.maxTime
             currentPath = candidatePath;
             dataStore.plannedPath = currentPath;
             pathTargetIdx = 1;
+            handoffPending = opts.handoffAlignEnabled;
+            handoffActive = false;
+            handoffStepCount = 0;
         elseif isempty(previousPath)
             stopReason = "astar_no_initial_path";
             stopDetails = sprintf('A* failed to find an initial path from PF estimate to target %d.', targetIdx);
@@ -580,6 +613,39 @@ while toc < opts.maxTime
         end
     end
 
+    if opts.handoffAlignEnabled && (handoffPending || handoffActive)
+        [alphaPath, hasPathHeading] = localInitialPathHeadingError(currentPath, poseCtrl, opts);
+        if hasPathHeading
+            if handoffPending
+                handoffActive = abs(alphaPath) > opts.handoffAlignAngle;
+                handoffPending = false;
+                handoffStepCount = 0;
+                if handoffActive
+                    fprintf('Waypoint handoff alignment: path starts %.1f deg behind current heading.\n', ...
+                        alphaPath * 180 / pi);
+                end
+            end
+            if handoffActive
+                if abs(alphaPath) <= opts.handoffReleaseAngle || handoffStepCount >= opts.handoffMaxSteps
+                    handoffActive = false;
+                else
+                    cmdV = 0;
+                    cmdW = sign(alphaPath) * opts.handoffTurnSpeed;
+                    cmdW = max(min(cmdW, opts.maxAngularSpeed), -opts.maxAngularSpeed);
+                    [cmdV, cmdW] = limitCmds(cmdV, cmdW, opts.maxWheelVelocity, opts.wheel2Center);
+                    SetFwdVelAngVelCreate(Robot, cmdV, cmdW);
+                    handoffStepCount = handoffStepCount + 1;
+                    pause(opts.loopPause);
+                    continue;
+                end
+            end
+        else
+            handoffPending = false;
+            handoffActive = false;
+            handoffStepCount = 0;
+        end
+    end
+
     [localTarget, pathTargetIdx] = localSelectLookaheadTarget( ...
         currentPath, pathTargetIdx, poseCtrl(1:2)', dynamicLookahead);
     delta = localTarget(:) - poseCtrl(1:2);
@@ -607,9 +673,14 @@ while toc < opts.maxTime
         end
         alpha = localWrapToPi(atan2(delta(2), delta(1)) - poseCtrl(3));
         lookaheadForControl = max(distToLocal, opts.purePursuitMinLookahead);
-        headingScale = max(opts.purePursuitMinHeadingScale, cos(alpha));
-        cmdV = speed * headingScale;
-        cmdW = opts.purePursuitGain * 2 * cmdV * sin(alpha) / lookaheadForControl;
+        if abs(alpha) > opts.purePursuitStopForwardAngle
+            cmdV = 0;
+            cmdW = sign(alpha) * opts.handoffTurnSpeed;
+        else
+            headingScale = max(opts.purePursuitMinHeadingScale, cos(alpha));
+            cmdV = speed * headingScale;
+            cmdW = opts.purePursuitGain * 2 * cmdV * sin(alpha) / lookaheadForControl;
+        end
     end
 
     cmdV = max(min(cmdV, opts.maxForwardSpeed), -opts.maxReverseSpeed);
@@ -817,6 +888,37 @@ while targetIdx < size(path, 1) && norm(path(targetIdx, :) - poseXY) < lookahead
 end
 
 target = path(targetIdx, :);
+end
+
+function [alphaPath, hasPathHeading] = localInitialPathHeadingError(path, pose, opts)
+alphaPath = 0;
+hasPathHeading = false;
+
+if size(path, 1) < 2
+    return;
+end
+
+pathStart = path(1, :);
+targetIdx = 0;
+for i = 2:size(path, 1)
+    if norm(path(i, :) - pathStart) >= opts.handoffTangentMinDistance
+        targetIdx = i;
+        break;
+    end
+end
+
+if targetIdx == 0
+    targetIdx = size(path, 1);
+end
+
+tangent = path(targetIdx, :) - pathStart;
+if norm(tangent) < 1e-6
+    return;
+end
+
+pathHeading = atan2(tangent(2), tangent(1));
+alphaPath = localWrapToPi(pathHeading - pose(3));
+hasPathHeading = true;
 end
 
 function visitGoalOrder = localGreedyVisitGoalOrder(costMatrix, startNodeIdx, remainingGoalNodeIdx)
