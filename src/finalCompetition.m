@@ -27,6 +27,7 @@ fprintf('Using map file: %s\n', char(mapMatPath));
 mapStruct = load(char(mapMatPath));
 map = mapStruct.map;
 candidateStarts = mapStruct.waypoints;
+optWalls = localOptionalField(mapStruct, 'optWalls', zeros(0, 4));
 
 beaconLoc = zeros(0, 3);
 if isfield(mapStruct, 'beaconLoc')
@@ -204,6 +205,33 @@ end
 if ~isfield(opts, 'ledPause')
     opts.ledPause = 0.2;
 end
+if ~isfield(opts, 'activeNavMapMode')
+    opts.activeNavMapMode = 'confirmed';
+end
+if ~isfield(opts, 'activeSenseReliableRange')
+    opts.activeSenseReliableRange = 4.0;
+end
+if ~isfield(opts, 'activeSenseSafetyEnabled')
+    opts.activeSenseSafetyEnabled = false;
+end
+if ~isfield(opts, 'activeSenseStopRange')
+    opts.activeSenseStopRange = 0.34;
+end
+if ~isfield(opts, 'activeSenseForwardFov')
+    opts.activeSenseForwardFov = 12 * pi / 180;
+end
+if ~isfield(opts, 'activeSensePathCorridor')
+    opts.activeSensePathCorridor = 0.22;
+end
+if ~isfield(opts, 'activeSensePathLookahead')
+    opts.activeSensePathLookahead = 0.55;
+end
+if ~isfield(opts, 'activeSenseUnexpectedMargin')
+    opts.activeSenseUnexpectedMargin = 0.18;
+end
+if ~isfield(opts, 'activeSenseReplanCooldown')
+    opts.activeSenseReplanCooldown = 5;
+end
 
 angles = linspace(27 * pi / 180, -27 * pi / 180, 10)';
 stayAwayPoints = localOptionalField(mapStruct, 'StayAwayPoints', ...
@@ -212,6 +240,8 @@ boundary = [min(map(:, [1, 3]), [], 'all'), ...
             min(map(:, [2, 4]), [], 'all'), ...
             max(map(:, [1, 3]), [], 'all'), ...
             max(map(:, [2, 4]), [], 'all')];
+wallBeliefs = initWallBeliefs(optWalls);
+[navMap, activePlotData] = buildActiveNavMap(map, optWalls, wallBeliefs, opts.activeNavMapMode);
 
 global dataStore;
 dataStore = struct( ...
@@ -224,7 +254,10 @@ dataStore = struct( ...
     'targetIdx', [], ...
     'visibleTags', [], ...
     'plannedPath', [], ...
-    'visitedWaypoints', zeros(0, 2));
+    'visitedWaypoints', zeros(0, 2), ...
+    'wallBeliefs', wallBeliefs, ...
+    'activeNavMap', navMap, ...
+    'activeSenseEvents', []);
 
 state = struct();
 particlesPre = [];
@@ -236,7 +269,8 @@ result.visitedWaypoints = zeros(0, 2);
 result.remainingGoals = opts.waypoints;
 result.globalVisitOrder = opts.waypoints;
 result.initResult = struct();
-result.wallBeliefs = [];
+result.wallBeliefs = wallBeliefs;
+result.activePlotData = activePlotData;
 result.replanCount = 0;
 result.mapMatPath = mapMatPath;
 result.outputDataPath = "";
@@ -293,10 +327,14 @@ DistanceSensorRoomba(Robot);
 
 plannedWaypoints = opts.waypoints;
 if opts.useGlobalPlanning
+    activeMapStruct = mapStruct;
+    activeMapStruct.map = navMap;
+    activeMapStruct.knownMap = map;
     plannedWaypoints = localBuildPlannedOrder( ...
-        mapStruct, candidateStarts, opts.waypoints, initResult, opts);
+        activeMapStruct, candidateStarts, opts.waypoints, initResult, opts);
 end
 opts.waypoints = plannedWaypoints;
+result.globalVisitOrder = plannedWaypoints;
 
 targetIdx = localInitialTargetIndex(initResult.bestPose, plannedWaypoints, opts.closeEnough);
 if targetIdx > 1
@@ -314,7 +352,11 @@ end
 if targetIdx > size(plannedWaypoints, 1)
     result.reachedAll = true;
     result.finalPoseEstimate = state.poseEstimate;
+    result.wallBeliefs = wallBeliefs;
+    result.activePlotData = activePlotData;
     dataStore.visitedWaypoints = result.visitedWaypoints;
+    dataStore.wallBeliefs = wallBeliefs;
+    dataStore.activeNavMap = navMap;
     [result.outputDataPath, result.outputPlotPath, result.outputFigurePath] = ...
         localSaveCompetitionOutput(baseDir, result, dataStore, mapStruct, plannedWaypoints);
     fprintf('Initialization pose is already within tolerance of all final-competition targets.\n');
@@ -326,6 +368,7 @@ for i = targetIdx:size(plannedWaypoints, 1)
     fprintf('  %d: [%.2f, %.2f]\n', i, plannedWaypoints(i, 1), plannedWaypoints(i, 2));
 end
 
+activeReplanCooldown = 0;
 tic;
 while toc < opts.maxTime
     iter = iter + 1;
@@ -372,6 +415,35 @@ while toc < opts.maxTime
     dataStore.robotPose = dataStore.pfEstimate;
     dataStore.targetIdx = [dataStore.targetIdx; toc, targetIdx];
     dataStore.visibleTags = [dataStore.visibleTags; toc, size(tags, 1)];
+    if activeReplanCooldown > 0
+        activeReplanCooldown = activeReplanCooldown - 1;
+    end
+
+    beliefOpts = struct( ...
+        'maxReliableRange', opts.activeSenseReliableRange);
+    [wallBeliefs, wallStatusChanged] = updateWallBeliefs( ...
+        poseCtrl, latestDepth, map, optWalls, wallBeliefs, opts.sensorOrigin, angles, beliefOpts);
+    [navMap, activePlotData] = buildActiveNavMap(map, optWalls, wallBeliefs, opts.activeNavMapMode);
+    result.wallBeliefs = wallBeliefs;
+    result.activePlotData = activePlotData;
+    dataStore.wallBeliefs = wallBeliefs;
+    dataStore.activeNavMap = navMap;
+
+    if wallStatusChanged
+        fprintf('Active sensing changed optional-wall status; replanning remaining goals.\n');
+        remainingGoals = plannedWaypoints(targetIdx:end, :);
+        plannedWaypoints = localReorderRemainingWaypoints( ...
+            navMap, boundary, poseCtrl, result.visitedWaypoints, remainingGoals, stayAwayPoints, opts);
+        opts.waypoints = plannedWaypoints;
+        targetIdx = size(result.visitedWaypoints, 1) + 1;
+        result.remainingGoals = plannedWaypoints(targetIdx:end, :);
+        result.globalVisitOrder = result.remainingGoals;
+        currentPath = zeros(0, 2);
+        pathTargetIdx = 1;
+        result.replanCount = result.replanCount + 1;
+        activeReplanCooldown = opts.activeSenseReplanCooldown;
+        continue;
+    end
 
     currentTarget = plannedWaypoints(targetIdx, :);
     deltaToGoal = currentTarget(:) - poseCtrl(1:2);
@@ -432,7 +504,7 @@ while toc < opts.maxTime
 
     if isempty(currentPath) || mod(iter, opts.replanEvery) == 1
         previousPath = currentPath;
-        [candidatePath, ~, ~, found] = planPathAStar(map, boundary, poseCtrl(1:2)', currentTarget, plannerOpts);
+        [candidatePath, ~, ~, found] = planPathAStar(navMap, boundary, poseCtrl(1:2)', currentTarget, plannerOpts);
         if found && ~isempty(candidatePath)
             currentPath = candidatePath;
             dataStore.plannedPath = currentPath;
@@ -442,6 +514,31 @@ while toc < opts.maxTime
             break;
         else
             warning('A* replanning failed at target %d. Continuing on previous path.', targetIdx);
+        end
+    end
+
+    if opts.activeSenseSafetyEnabled
+        safetyOpts = struct( ...
+            'stopRange', opts.activeSenseStopRange, ...
+            'forwardFov', opts.activeSenseForwardFov, ...
+            'pathCorridor', opts.activeSensePathCorridor, ...
+            'pathLookahead', opts.activeSensePathLookahead, ...
+            'maxReliableRange', min(opts.activeSenseReliableRange, 2.0), ...
+            'unexpectedMargin', opts.activeSenseUnexpectedMargin, ...
+            'expectedDepth', depthPredict(poseCtrl, navMap, opts.sensorOrigin, angles, 10.0));
+        [unsafe, unsafeReason, unsafePoint] = activeSenseSafetyCheck( ...
+            poseCtrl, latestDepth, currentPath, opts.sensorOrigin, angles, safetyOpts);
+        if unsafe
+            SetFwdVelAngVelCreate(Robot, 0, 0);
+            fprintf('Active sensing safety stop: %s\n', unsafeReason);
+            dataStore.activeSenseEvents = [dataStore.activeSenseEvents; ...
+                toc, targetIdx, unsafePoint(1), unsafePoint(2)];
+            currentPath = zeros(0, 2);
+            pathTargetIdx = 1;
+            result.replanCount = result.replanCount + 1;
+            activeReplanCooldown = opts.activeSenseReplanCooldown;
+            pause(opts.loopPause);
+            continue;
         end
     end
 
@@ -527,7 +624,11 @@ if ~isempty(fig) && isvalid(fig)
 end
 
 result.finalPoseEstimate = state.poseEstimate;
+result.wallBeliefs = wallBeliefs;
+result.activePlotData = activePlotData;
 dataStore.visitedWaypoints = result.visitedWaypoints;
+dataStore.wallBeliefs = wallBeliefs;
+dataStore.activeNavMap = navMap;
 [result.outputDataPath, result.outputPlotPath, result.outputFigurePath] = ...
     localSaveCompetitionOutput(baseDir, result, dataStore, mapStruct, plannedWaypoints);
 
@@ -585,6 +686,24 @@ end
 remainingGoalNodeIdx = nodeMeta.goalNodeIdx(remainingGoalIdx);
 [~, visitGoalOrder, totalCost] = solveGlobalVisitOrder(costMatrix, startNodeIdx, remainingGoalNodeIdx);
 if isempty(visitGoalOrder)
+    if isfield(mapStruct, 'knownMap')
+        fprintf('Conservative global planning failed; retrying waypoint order on known map.\n');
+        [~, costMatrixKnown, ~, nodeMetaKnown] = precomputePairwisePathCosts( ...
+            mapStruct.knownMap, candidateStarts, goalPoints, plannerOpts);
+        startNodeIdxKnown = nodeMetaKnown.candidateStartNodeIdx(initResult.bestWaypointIdx);
+        remainingGoalNodeIdxKnown = nodeMetaKnown.goalNodeIdx(remainingGoalIdx);
+        [~, visitGoalOrder, totalCost] = solveGlobalVisitOrder( ...
+            costMatrixKnown, startNodeIdxKnown, remainingGoalNodeIdxKnown);
+        if isempty(visitGoalOrder)
+            visitGoalOrder = localGreedyVisitGoalOrder(costMatrixKnown, startNodeIdxKnown, remainingGoalNodeIdxKnown);
+            totalCost = nan;
+        end
+    else
+        visitGoalOrder = localGreedyVisitGoalOrder(costMatrix, startNodeIdx, remainingGoalNodeIdx);
+        totalCost = nan;
+    end
+end
+if isempty(visitGoalOrder)
     warning('finalCompetition:GlobalPlanningFailed', ...
         'Global planning failed; falling back to stored target order.');
     return;
@@ -592,6 +711,68 @@ end
 
 plannedWaypoints = goalPoints(remainingGoalIdx(visitGoalOrder), :);
 fprintf('Global planning cost: %.3f over %d remaining goals.\n', totalCost, size(plannedWaypoints, 1));
+end
+
+function plannedWaypoints = localReorderRemainingWaypoints(navMap, boundary, pose, visitedWaypoints, remainingGoals, stayAwayPoints, opts)
+plannedWaypoints = [visitedWaypoints; remainingGoals];
+
+if isempty(remainingGoals) || ~opts.useGlobalPlanning
+    return;
+end
+
+plannerOpts = struct( ...
+    'plannerType', opts.globalPlannerType, ...
+    'boundary', boundary, ...
+    'stayAwayPoints', stayAwayPoints, ...
+    'planResolution', opts.planResolution, ...
+    'robotInflation', opts.robotInflation, ...
+    'stayAwayInflation', opts.stayAwayInflation, ...
+    'preferredClearance', opts.preferredClearance, ...
+    'clearanceWeight', opts.clearanceWeight, ...
+    'maxShortcutLength', opts.maxShortcutLength, ...
+    'nPRM', 150);
+
+[~, costMatrix, ~, nodeMeta] = precomputePairwisePathCosts( ...
+    navMap, pose(1:2)', remainingGoals, plannerOpts);
+
+startNodeIdx = nodeMeta.candidateStartNodeIdx(1);
+remainingGoalNodeIdx = nodeMeta.goalNodeIdx(1:size(remainingGoals, 1));
+[~, visitGoalOrder, totalCost] = solveGlobalVisitOrder(costMatrix, startNodeIdx, remainingGoalNodeIdx);
+
+if isempty(visitGoalOrder)
+    visitGoalOrder = localGreedyVisitGoalOrder(costMatrix, startNodeIdx, remainingGoalNodeIdx);
+    totalCost = nan;
+    if isempty(visitGoalOrder)
+        warning('finalCompetition:ActiveReplanFailed', ...
+            'Active sensing global reorder failed; keeping previous remaining order.');
+        return;
+    end
+end
+
+plannedWaypoints = [visitedWaypoints; remainingGoals(visitGoalOrder, :)];
+fprintf('Active sensing replanned remaining goals, cost %.3f over %d goals.\n', ...
+    totalCost, size(remainingGoals, 1));
+end
+
+function visitGoalOrder = localGreedyVisitGoalOrder(costMatrix, startNodeIdx, remainingGoalNodeIdx)
+remainingGoalNodeIdx = remainingGoalNodeIdx(:)';
+unvisited = 1:numel(remainingGoalNodeIdx);
+visitGoalOrder = zeros(1, 0);
+currentNode = startNodeIdx;
+
+while ~isempty(unvisited)
+    costs = costMatrix(currentNode, remainingGoalNodeIdx(unvisited));
+    [bestCost, bestLocalIdx] = min(costs);
+    if ~isfinite(bestCost)
+        visitGoalOrder = [visitGoalOrder, unvisited]; %#ok<AGROW>
+        return;
+    end
+
+    nextGoalOrderIdx = unvisited(bestLocalIdx);
+    visitGoalOrder(end + 1) = nextGoalOrderIdx; %#ok<AGROW>
+    currentNode = remainingGoalNodeIdx(nextGoalOrderIdx);
+    unvisited(bestLocalIdx) = [];
+end
 end
 
 function waypoints = localResolveFinalTargets(mapStruct)
@@ -827,6 +1008,8 @@ outputData.depthData = dataStore.rsdepth;
 outputData.bumpData = dataStore.bump;
 outputData.beaconData = dataStore.beacon;
 outputData.visitedWaypoints = result.visitedWaypoints;
+outputData.wallBeliefs = result.wallBeliefs;
+outputData.activeNavMap = dataStore.activeNavMap;
 outputData.dataStore = dataStore;
 outputData.result = result;
 outputData.mapStruct = mapStruct;
@@ -907,9 +1090,23 @@ for i = 1:size(optWalls, 1)
     color = 'r';
     shouldPlot = true;
     if ~isempty(wallBeliefs) && numel(wallBeliefs) >= i
-        if wallBeliefs(i) >= 0.7
+        if isstruct(wallBeliefs)
+            status = wallBeliefs(i).status;
+            probPresent = wallBeliefs(i).probPresent;
+        else
+            probPresent = wallBeliefs(i);
+            if probPresent >= 0.7
+                status = 'present';
+            elseif probPresent <= 0.3
+                status = 'absent';
+            else
+                status = 'unknown';
+            end
+        end
+
+        if strcmp(status, 'present') || probPresent >= 0.7
             color = 'k';
-        elseif wallBeliefs(i) <= 0.3
+        elseif strcmp(status, 'absent') || probPresent <= 0.3
             shouldPlot = false;
         end
     end
