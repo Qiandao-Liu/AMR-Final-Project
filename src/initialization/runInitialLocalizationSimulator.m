@@ -46,8 +46,7 @@ function result = runInitialLocalizationSimulator(Robot, mapMatPath, opts)
 %                     .rawDepth
 
 if nargin < 2 || isempty(mapMatPath)
-    baseDir = fileparts(fileparts(fileparts(mfilename('fullpath'))));
-    mapMatPath = fullfile(baseDir, '3credits_practice', 'map1_3credits.mat');
+    mapMatPath = localResolveMapDirectoryPath();
 end
 
 if nargin < 3
@@ -97,7 +96,8 @@ if ~isfield(opts, 'verbose')
     opts.verbose = true;
 end
 
-mapStruct = load(mapMatPath);
+fprintf('Using initialization map file: %s\n', char(mapMatPath));
+mapStruct = load(char(mapMatPath));
 
 if ~isfield(mapStruct, 'map') || ~isfield(mapStruct, 'waypoints')
     error('Map file must contain at least fields "map" and "waypoints".');
@@ -118,8 +118,8 @@ if ~isempty(initialDepth)
     centerIdx = ceil(length(initialDepth) / 2);
     centerDepth = initialDepth(centerIdx);
     if isfinite(centerDepth) && centerDepth > 0
-        rawAngles(end + 1, 1) = 0; %#ok<AGROW>
-        rawDepth(end + 1, 1) = centerDepth; %#ok<AGROW>
+        rawAngles(end + 1, 1) = 0;
+        rawDepth(end + 1, 1) = centerDepth;
     end
 end
 
@@ -244,4 +244,58 @@ end
 
 function anglesWrapped = localWrapToPi(angles)
 anglesWrapped = mod(angles + pi, 2 * pi) - pi;
+end
+
+function mapMatPath = localResolveMapDirectoryPath()
+baseDir = fileparts(fileparts(fileparts(mfilename('fullpath'))));
+mapDir = fullfile(baseDir, 'src', 'map');
+if ~isfolder(mapDir)
+    error('runInitialLocalizationSimulator:MapDirectoryNotFound', ...
+        'Expected map directory does not exist: %s', mapDir);
+end
+
+files = dir(mapDir);
+files = files(~[files.isdir]);
+files = files(~startsWith({files.name}, '.'));
+
+if numel(files) ~= 1
+    error('runInitialLocalizationSimulator:InvalidMapDirectory', ...
+        'Expected exactly one map file in %s, found %d.', mapDir, numel(files));
+end
+
+mapMatPath = localResolveMapPath(fullfile(files(1).folder, files(1).name));
+end
+
+function mapMatPath = localResolveMapPath(mapMatPath)
+mapMatPath = string(mapMatPath);
+
+if endsWith(lower(mapMatPath), ".txt")
+    txtPath = mapMatPath;
+    matPath = replace(txtPath, ".txt", ".mat");
+    if isfile(matPath)
+        mapMatPath = matPath;
+        return;
+    end
+end
+
+if isfile(mapMatPath) && endsWith(lower(mapMatPath), ".mat")
+    return;
+end
+
+[~, mapName, ext] = fileparts(mapMatPath);
+baseDir = fileparts(fileparts(fileparts(mfilename('fullpath'))));
+candidates = [
+    fullfile(baseDir, '3credits_practice', mapName + ".mat")
+    fullfile(baseDir, '3credits_practice', mapName + ext)
+];
+
+for i = 1:numel(candidates)
+    if isfile(candidates(i)) && endsWith(lower(candidates(i)), ".mat")
+        mapMatPath = candidates(i);
+        return;
+    end
+end
+
+error('runInitialLocalizationSimulator:MapNotFound', ...
+    'Unable to find a .mat map for ''%s''.', mapMatPath);
 end

@@ -14,15 +14,17 @@ function result = finalCompetition(Robot, mapMatPath, opts)
 baseDir = fileparts(fileparts(mfilename('fullpath')));
 addpath(genpath(fullfile(baseDir, 'src')));
 
-if nargin < 2 || isempty(mapMatPath)
-    mapMatPath = fullfile(baseDir, '3credits_practice', 'map1_3credits.mat');
-end
 if nargin < 3
     opts = struct();
 end
 
-mapMatPath = localResolveMapPath(mapMatPath);
-mapStruct = load(mapMatPath);
+if nargin < 2 || isempty(mapMatPath)
+    mapMatPath = localResolveMapDirectoryPath(baseDir);
+else
+    mapMatPath = localResolveMapPath(mapMatPath);
+end
+fprintf('Using map file: %s\n', char(mapMatPath));
+mapStruct = load(char(mapMatPath));
 map = mapStruct.map;
 candidateStarts = mapStruct.waypoints;
 
@@ -199,12 +201,13 @@ end
 if ~isfield(opts, 'tagSnapAlpha')
     opts.tagSnapAlpha = 0.65;
 end
+if ~isfield(opts, 'ledPause')
+    opts.ledPause = 0.2;
+end
 
 angles = linspace(27 * pi / 180, -27 * pi / 180, 10)';
-stayAwayPoints = zeros(0, 2);
-if isfield(mapStruct, 'stayAwayPoints')
-    stayAwayPoints = mapStruct.stayAwayPoints;
-end
+stayAwayPoints = localOptionalField(mapStruct, 'StayAwayPoints', ...
+    localOptionalField(mapStruct, 'stayAwayPoints', zeros(0, 2)));
 boundary = [min(map(:, [1, 3]), [], 'all'), ...
             min(map(:, [2, 4]), [], 'all'), ...
             max(map(:, [1, 3]), [], 'all'), ...
@@ -216,10 +219,12 @@ dataStore = struct( ...
     'rsdepth', [], ...
     'bump', [], ...
     'beacon', [], ...
+    'robotPose', [], ...
     'pfEstimate', [], ...
     'targetIdx', [], ...
     'visibleTags', [], ...
-    'plannedPath', []);
+    'plannedPath', [], ...
+    'visitedWaypoints', zeros(0, 2));
 
 state = struct();
 particlesPre = [];
@@ -233,6 +238,10 @@ result.globalVisitOrder = opts.waypoints;
 result.initResult = struct();
 result.wallBeliefs = [];
 result.replanCount = 0;
+result.mapMatPath = mapMatPath;
+result.outputDataPath = "";
+result.outputPlotPath = "";
+result.outputFigurePath = "";
 
 iter = 0;
 currentPath = zeros(0, 2);
@@ -250,6 +259,7 @@ end
 cleanupObj = onCleanup(@() localCleanup(Robot));
 
 SetFwdVelAngVelCreate(Robot, 0, 0);
+localSetPowerLED(Robot, 'green', opts);
 pause(0.2);
 
 if isempty(opts.waypoints)
@@ -291,6 +301,7 @@ opts.waypoints = plannedWaypoints;
 targetIdx = localInitialTargetIndex(initResult.bestPose, plannedWaypoints, opts.closeEnough);
 if targetIdx > 1
     result.visitedWaypoints = plannedWaypoints(1:targetIdx - 1, :);
+    dataStore.visitedWaypoints = result.visitedWaypoints;
 end
 if targetIdx <= size(plannedWaypoints, 1)
     result.remainingGoals = plannedWaypoints(targetIdx:end, :);
@@ -303,6 +314,9 @@ end
 if targetIdx > size(plannedWaypoints, 1)
     result.reachedAll = true;
     result.finalPoseEstimate = state.poseEstimate;
+    dataStore.visitedWaypoints = result.visitedWaypoints;
+    [result.outputDataPath, result.outputPlotPath, result.outputFigurePath] = ...
+        localSaveCompetitionOutput(baseDir, result, dataStore, mapStruct, plannedWaypoints);
     fprintf('Initialization pose is already within tolerance of all final-competition targets.\n');
     return;
 end
@@ -355,6 +369,7 @@ while toc < opts.maxTime
     controlPose = localUpdateControlPose(controlPose, poseEst, size(tags, 1), opts);
     poseCtrl = controlPose;
     dataStore.pfEstimate = [dataStore.pfEstimate; toc, poseCtrl'];
+    dataStore.robotPose = dataStore.pfEstimate;
     dataStore.targetIdx = [dataStore.targetIdx; toc, targetIdx];
     dataStore.visibleTags = [dataStore.visibleTags; toc, size(tags, 1)];
 
@@ -363,6 +378,8 @@ while toc < opts.maxTime
     distToGoal = norm(deltaToGoal);
 
     if distToGoal <= opts.closeEnough
+        SetFwdVelAngVelCreate(Robot, 0, 0);
+        localSetPowerLED(Robot, 'red', opts);
         fprintf('Reached target %d at [%.3f, %.3f]\n', ...
             targetIdx, currentTarget(1), currentTarget(2));
         if isempty(result.visitedWaypoints)
@@ -370,6 +387,7 @@ while toc < opts.maxTime
         else
             result.visitedWaypoints = [result.visitedWaypoints; currentTarget];
         end
+        dataStore.visitedWaypoints = result.visitedWaypoints;
         targetIdx = targetIdx + 1;
 
         if targetIdx > size(plannedWaypoints, 1)
@@ -379,6 +397,7 @@ while toc < opts.maxTime
             break;
         end
 
+        localSetPowerLED(Robot, 'green', opts);
         currentPath = zeros(0, 2);
         pathTargetIdx = 1;
         snakeCount = 0;
@@ -387,7 +406,8 @@ while toc < opts.maxTime
         prevCmdWSign = 0;
         result.remainingGoals = plannedWaypoints(targetIdx:end, :);
         result.globalVisitOrder = result.remainingGoals;
-        currentTarget = plannedWaypoints(targetIdx, :);
+        pause(opts.loopPause);
+        continue;
     end
 
     dynamicLookahead = opts.lookaheadDistance;
@@ -507,6 +527,9 @@ if ~isempty(fig) && isvalid(fig)
 end
 
 result.finalPoseEstimate = state.poseEstimate;
+dataStore.visitedWaypoints = result.visitedWaypoints;
+[result.outputDataPath, result.outputPlotPath, result.outputFigurePath] = ...
+    localSaveCompetitionOutput(baseDir, result, dataStore, mapStruct, plannedWaypoints);
 
 if result.reachedAll
     fprintf('Completed all %d final-competition targets.\n', size(plannedWaypoints, 1));
@@ -524,10 +547,8 @@ if isempty(goalPoints)
     return;
 end
 
-stayAwayPoints = zeros(0, 2);
-if isfield(mapStruct, 'stayAwayPoints')
-    stayAwayPoints = mapStruct.stayAwayPoints;
-end
+stayAwayPoints = localOptionalField(mapStruct, 'StayAwayPoints', ...
+    localOptionalField(mapStruct, 'stayAwayPoints', zeros(0, 2)));
 
 boundary = [min(mapStruct.map(:, [1, 3]), [], 'all'), ...
             min(mapStruct.map(:, [2, 4]), [], 'all'), ...
@@ -728,6 +749,21 @@ catch
 end
 end
 
+function localSetPowerLED(Robot, colorName, opts)
+switch lower(colorName)
+    case 'green'
+        powerColor = 0;
+    case 'red'
+        powerColor = 100;
+    otherwise
+        error('finalCompetition:InvalidLEDColor', ...
+            'Unsupported power LED color ''%s''.', colorName);
+end
+
+SetLEDsRoomba(Robot, 3, powerColor, 100);
+pause(opts.ledPause);
+end
+
 function dataStore = localReadSensors(Robot, dataStore)
 try
     CreatePort = Robot.CreatePort;
@@ -769,6 +805,130 @@ catch
 end
 end
 
+function [dataPath, plotPath, figPath] = localSaveCompetitionOutput(baseDir, result, dataStore, mapStruct, plannedWaypoints)
+outputDir = fullfile(baseDir, 'src', 'output');
+if ~isfolder(outputDir)
+    mkdir(outputDir);
+end
+
+timestamp = char(datetime('now', 'Format', 'yyyyMMdd_HHmmss'));
+dataPath = string(fullfile(outputDir, "finalCompetitionOutput_" + timestamp + ".mat"));
+plotPath = string(fullfile(outputDir, "finalCompetitionPlot_" + timestamp + ".png"));
+figPath = string(fullfile(outputDir, "finalCompetitionPlot_" + timestamp + ".fig"));
+
+result.outputDataPath = dataPath;
+result.outputPlotPath = plotPath;
+result.outputFigurePath = figPath;
+
+outputData = struct();
+outputData.robotPose = dataStore.robotPose;
+outputData.odometry = dataStore.odometry;
+outputData.depthData = dataStore.rsdepth;
+outputData.bumpData = dataStore.bump;
+outputData.beaconData = dataStore.beacon;
+outputData.visitedWaypoints = result.visitedWaypoints;
+outputData.dataStore = dataStore;
+outputData.result = result;
+outputData.mapStruct = mapStruct;
+outputData.plannedWaypoints = plannedWaypoints;
+outputData.savedAt = timestamp;
+
+save(char(dataPath), 'outputData', 'dataStore', 'result', 'mapStruct', 'plannedWaypoints');
+
+try
+    fig = localCreateFinalOutputPlot(mapStruct, plannedWaypoints, result, dataStore);
+    savefig(fig, char(figPath));
+    saveas(fig, char(plotPath));
+    close(fig);
+catch me
+    warning('finalCompetition:OutputPlotFailed', ...
+        'Saved output data but failed to save output plot: %s', me.message);
+    plotPath = "";
+    figPath = "";
+end
+
+fprintf('Saved competition output data: %s\n', char(dataPath));
+if strlength(plotPath) > 0
+    fprintf('Saved competition output plot: %s\n', char(plotPath));
+end
+end
+
+function fig = localCreateFinalOutputPlot(mapStruct, plannedWaypoints, result, dataStore)
+fig = figure('Name', 'Final Competition Output', 'Color', 'w', 'Visible', 'off');
+ax = axes(fig);
+hold(ax, 'on');
+axis(ax, 'equal');
+grid(ax, 'on');
+
+map = mapStruct.map;
+for i = 1:size(map, 1)
+    plot(ax, [map(i, 1), map(i, 3)], [map(i, 2), map(i, 4)], 'k-', 'LineWidth', 2);
+end
+
+optWalls = localOptionalField(mapStruct, 'optWalls', zeros(0, 4));
+localPlotOptionalWalls(ax, optWalls, result.wallBeliefs);
+
+stayAwayPoints = localOptionalField(mapStruct, 'StayAwayPoints', ...
+    localOptionalField(mapStruct, 'stayAwayPoints', zeros(0, 2)));
+if ~isempty(stayAwayPoints)
+    plot(ax, stayAwayPoints(:, 1), stayAwayPoints(:, 2), 'x', ...
+        'Color', [1, 0.5, 0], 'MarkerSize', 8, 'LineWidth', 1.5);
+end
+
+if ~isempty(plannedWaypoints)
+    plot(ax, plannedWaypoints(:, 1), plannedWaypoints(:, 2), 'bo', ...
+        'MarkerFaceColor', 'c', 'MarkerSize', 7);
+end
+
+if ~isempty(result.visitedWaypoints)
+    plot(ax, result.visitedWaypoints(:, 1), result.visitedWaypoints(:, 2), 'go', ...
+        'MarkerFaceColor', 'g', 'MarkerSize', 9, 'LineWidth', 1.5);
+end
+
+if ~isempty(dataStore.robotPose)
+    plot(ax, dataStore.robotPose(:, 2), dataStore.robotPose(:, 3), 'r-', 'LineWidth', 1.5);
+    plot(ax, dataStore.robotPose(end, 2), dataStore.robotPose(end, 3), 'ro', ...
+        'MarkerFaceColor', 'r');
+end
+
+xlim(ax, [min(map(:, [1, 3]), [], 'all') - 0.5, max(map(:, [1, 3]), [], 'all') + 0.5]);
+ylim(ax, [min(map(:, [2, 4]), [], 'all') - 0.5, max(map(:, [2, 4]), [], 'all') + 0.5]);
+title(ax, 'Final Competition Output');
+xlabel(ax, 'x (m)');
+ylabel(ax, 'y (m)');
+end
+
+function localPlotOptionalWalls(ax, optWalls, wallBeliefs)
+if isempty(optWalls)
+    return;
+end
+
+for i = 1:size(optWalls, 1)
+    color = 'r';
+    shouldPlot = true;
+    if ~isempty(wallBeliefs) && numel(wallBeliefs) >= i
+        if wallBeliefs(i) >= 0.7
+            color = 'k';
+        elseif wallBeliefs(i) <= 0.3
+            shouldPlot = false;
+        end
+    end
+
+    if shouldPlot
+        plot(ax, [optWalls(i, 1), optWalls(i, 3)], [optWalls(i, 2), optWalls(i, 4)], ...
+            '-', 'Color', color, 'LineWidth', 1.5);
+    end
+end
+end
+
+function value = localOptionalField(s, fieldName, defaultValue)
+if isfield(s, fieldName)
+    value = s.(fieldName);
+else
+    value = defaultValue;
+end
+end
+
 function mapMatPath = localResolveMapPath(mapMatPath)
 mapMatPath = string(mapMatPath);
 
@@ -781,7 +941,7 @@ if endsWith(lower(mapMatPath), ".txt")
     end
 end
 
-if isfile(mapMatPath)
+if isfile(mapMatPath) && endsWith(lower(mapMatPath), ".mat")
     return;
 end
 
@@ -794,11 +954,32 @@ candidates = [
 
 for i = 1:numel(candidates)
     if isfile(candidates(i))
-        mapMatPath = candidates(i);
-        return;
+        if endsWith(lower(candidates(i)), ".mat")
+            mapMatPath = candidates(i);
+            return;
+        end
     end
 end
 
 error('finalCompetition:MapNotFound', ...
-    'Unable to find map file ''%s'' or a matching .mat file.', mapMatPath);
+    'Unable to find a .mat map for ''%s''.', mapMatPath);
+end
+
+function mapMatPath = localResolveMapDirectoryPath(baseDir)
+mapDir = fullfile(baseDir, 'src', 'map');
+if ~isfolder(mapDir)
+    error('finalCompetition:MapDirectoryNotFound', ...
+        'Expected map directory does not exist: %s', mapDir);
+end
+
+files = dir(mapDir);
+files = files(~[files.isdir]);
+files = files(~startsWith({files.name}, '.'));
+
+if numel(files) ~= 1
+    error('finalCompetition:InvalidMapDirectory', ...
+        'Expected exactly one map file in %s, found %d.', mapDir, numel(files));
+end
+
+mapMatPath = localResolveMapPath(fullfile(files(1).folder, files(1).name));
 end
