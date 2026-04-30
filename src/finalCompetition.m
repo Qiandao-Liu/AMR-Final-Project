@@ -50,7 +50,19 @@ if ~isfield(opts, 'epsilon')
     opts.epsilon = 0.15;
 end
 if ~isfield(opts, 'desiredSpeed')
-    opts.desiredSpeed = 0.12;
+    opts.desiredSpeed = 0.16;
+end
+if ~isfield(opts, 'desiredSpeedNoBeacon')
+    opts.desiredSpeedNoBeacon = 0.10;
+end
+if ~isfield(opts, 'desiredSpeedPoorPF')
+    opts.desiredSpeedPoorPF = 0.08;
+end
+if ~isfield(opts, 'pfSlowSpread')
+    opts.pfSlowSpread = 0.06;
+end
+if ~isfield(opts, 'pfSlowNeff')
+    opts.pfSlowNeff = 80;
 end
 if ~isfield(opts, 'maxForwardSpeed')
     opts.maxForwardSpeed = 0.14;
@@ -68,7 +80,7 @@ if ~isfield(opts, 'wheel2Center')
     opts.wheel2Center = 0.13;
 end
 if ~isfield(opts, 'maxWheelVelocity')
-    opts.maxWheelVelocity = 0.25;
+    opts.maxWheelVelocity = 0.30;
 end
 if ~isfield(opts, 'sensorOrigin')
     opts.sensorOrigin = [0.08; 0];
@@ -112,11 +124,20 @@ end
 if ~isfield(opts, 'maxAngularSpeed')
     opts.maxAngularSpeed = 0.6;
 end
+if ~isfield(opts, 'purePursuitGain')
+    opts.purePursuitGain = 0.9;
+end
+if ~isfield(opts, 'purePursuitMinLookahead')
+    opts.purePursuitMinLookahead = 0.25;
+end
+if ~isfield(opts, 'purePursuitMinHeadingScale')
+    opts.purePursuitMinHeadingScale = 0.45;
+end
 if ~isfield(opts, 'lookaheadDistance')
-    opts.lookaheadDistance = 0.25;
+    opts.lookaheadDistance = 0.45;
 end
 if ~isfield(opts, 'nearGoalLookaheadDistance')
-    opts.nearGoalLookaheadDistance = 0.15;
+    opts.nearGoalLookaheadDistance = 0.22;
 end
 if ~isfield(opts, 'replanEvery')
     opts.replanEvery = 5;
@@ -125,28 +146,28 @@ if ~isfield(opts, 'planResolution')
     opts.planResolution = 0.10;
 end
 if ~isfield(opts, 'robotInflation')
-    opts.robotInflation = 0.22;
+    opts.robotInflation = 0.27;
 end
 if ~isfield(opts, 'stayAwayInflation')
-    opts.stayAwayInflation = 0.25;
+    opts.stayAwayInflation = 0.42;
 end
 if ~isfield(opts, 'preferredClearance')
-    opts.preferredClearance = opts.robotInflation + 0.25;
+    opts.preferredClearance = opts.robotInflation + 0.35;
 end
 if ~isfield(opts, 'clearanceWeight')
-    opts.clearanceWeight = 2.0;
+    opts.clearanceWeight = 3.5;
 end
 if ~isfield(opts, 'maxShortcutLength')
-    opts.maxShortcutLength = 0.25;
+    opts.maxShortcutLength = 0.18;
 end
 if ~isfield(opts, 'nearGoalShortcutLength')
-    opts.nearGoalShortcutLength = 0.12;
+    opts.nearGoalShortcutLength = 0.08;
 end
 if ~isfield(opts, 'nearGoalSlowRadius')
-    opts.nearGoalSlowRadius = 0.80;
+    opts.nearGoalSlowRadius = 0.60;
 end
 if ~isfield(opts, 'nearGoalMinSpeed')
-    opts.nearGoalMinSpeed = 0.055;
+    opts.nearGoalMinSpeed = 0.05;
 end
 if ~isfield(opts, 'snakeAngularThreshold')
     opts.snakeAngularThreshold = 0.45;
@@ -559,31 +580,38 @@ while toc < opts.maxTime
         end
     end
 
-    while pathTargetIdx < size(currentPath, 1) && ...
-            norm(currentPath(pathTargetIdx, :)' - poseCtrl(1:2)) < dynamicLookahead
-        pathTargetIdx = pathTargetIdx + 1;
-    end
-
-    localTarget = currentPath(pathTargetIdx, :);
+    [localTarget, pathTargetIdx] = localSelectLookaheadTarget( ...
+        currentPath, pathTargetIdx, poseCtrl(1:2)', dynamicLookahead);
     delta = localTarget(:) - poseCtrl(1:2);
     distToLocal = norm(delta);
 
     if distToLocal < 1e-6
-        desiredVel = [0; 0];
+        cmdV = 0;
+        cmdW = 0;
     else
-        speed = opts.desiredSpeed;
+        speedLimit = opts.desiredSpeed;
+        if isempty(tags)
+            speedLimit = min(speedLimit, opts.desiredSpeedNoBeacon);
+        end
+        if pfSpread > opts.pfSlowSpread || neff < opts.pfSlowNeff
+            speedLimit = min(speedLimit, opts.desiredSpeedPoorPF);
+        end
+        speed = speedLimit;
         if distToGoal <= opts.nearGoalSlowRadius
             slowScale = max(distToGoal / opts.nearGoalSlowRadius, 0);
             speed = opts.nearGoalMinSpeed + ...
-                (opts.desiredSpeed - opts.nearGoalMinSpeed) * slowScale;
+                (speedLimit - opts.nearGoalMinSpeed) * slowScale;
         end
         if distToLocal < 0.4
-            speed = speed * max(distToLocal / 0.4, 0.25);
+            speed = speed * max(distToLocal / 0.4, 0.55);
         end
-        desiredVel = speed * delta / distToLocal;
+        alpha = localWrapToPi(atan2(delta(2), delta(1)) - poseCtrl(3));
+        lookaheadForControl = max(distToLocal, opts.purePursuitMinLookahead);
+        headingScale = max(opts.purePursuitMinHeadingScale, cos(alpha));
+        cmdV = speed * headingScale;
+        cmdW = opts.purePursuitGain * 2 * cmdV * sin(alpha) / lookaheadForControl;
     end
 
-    [cmdV, cmdW] = feedbackLin(desiredVel(1), desiredVel(2), poseCtrl(3), opts.epsilon);
     cmdV = max(min(cmdV, opts.maxForwardSpeed), -opts.maxReverseSpeed);
     [cmdV, cmdW] = limitCmds(cmdV, cmdW, opts.maxWheelVelocity, opts.wheel2Center);
     cmdW = max(min(cmdW, opts.maxAngularSpeed), -opts.maxAngularSpeed);
@@ -771,6 +799,24 @@ end
 plannedWaypoints = [visitedWaypoints; remainingGoals(visitGoalOrder, :)];
 fprintf('Active sensing replanned remaining goals, cost %.3f over %d goals.\n', ...
     totalCost, size(remainingGoals, 1));
+end
+
+function [target, targetIdx] = localSelectLookaheadTarget(path, currentIdx, poseXY, lookaheadDistance)
+if isempty(path)
+    target = poseXY;
+    targetIdx = 1;
+    return;
+end
+
+targetIdx = min(max(currentIdx, 1), size(path, 1));
+[~, nearestIdx] = min(vecnorm(path(targetIdx:end, :) - poseXY, 2, 2));
+targetIdx = targetIdx + nearestIdx - 1;
+
+while targetIdx < size(path, 1) && norm(path(targetIdx, :) - poseXY) < lookaheadDistance
+    targetIdx = targetIdx + 1;
+end
+
+target = path(targetIdx, :);
 end
 
 function visitGoalOrder = localGreedyVisitGoalOrder(costMatrix, startNodeIdx, remainingGoalNodeIdx)
