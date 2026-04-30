@@ -276,6 +276,8 @@ result.mapMatPath = mapMatPath;
 result.outputDataPath = "";
 result.outputPlotPath = "";
 result.outputFigurePath = "";
+result.stopReason = "not_started";
+result.stopDetails = "";
 
 iter = 0;
 currentPath = zeros(0, 2);
@@ -351,6 +353,8 @@ end
 
 if targetIdx > size(plannedWaypoints, 1)
     result.reachedAll = true;
+    result.stopReason = "completed";
+    result.stopDetails = "Initialization pose is already within tolerance of all final-competition targets.";
     result.finalPoseEstimate = state.poseEstimate;
     result.wallBeliefs = wallBeliefs;
     result.activePlotData = activePlotData;
@@ -369,6 +373,8 @@ for i = targetIdx:size(plannedWaypoints, 1)
 end
 
 activeReplanCooldown = 0;
+stopReason = "time_limit";
+stopDetails = sprintf('Time limit reached after %.1f seconds.', opts.maxTime);
 tic;
 while toc < opts.maxTime
     iter = iter + 1;
@@ -430,6 +436,8 @@ while toc < opts.maxTime
     dataStore.activeNavMap = navMap;
 
     if wallStatusChanged
+        SetFwdVelAngVelCreate(Robot, 0, 0);
+        pause(opts.loopPause);
         fprintf('Active sensing changed optional-wall status; replanning remaining goals.\n');
         remainingGoals = plannedWaypoints(targetIdx:end, :);
         plannedWaypoints = localReorderRemainingWaypoints( ...
@@ -464,6 +472,8 @@ while toc < opts.maxTime
 
         if targetIdx > size(plannedWaypoints, 1)
             result.reachedAll = true;
+            stopReason = "completed";
+            stopDetails = sprintf('Completed all %d final-competition targets.', size(plannedWaypoints, 1));
             result.remainingGoals = zeros(0, 2);
             result.globalVisitOrder = zeros(0, 2);
             break;
@@ -510,7 +520,9 @@ while toc < opts.maxTime
             dataStore.plannedPath = currentPath;
             pathTargetIdx = 1;
         elseif isempty(previousPath)
-            warning('A* failed to find an initial path from PF estimate to target %d. Stopping.', targetIdx);
+            stopReason = "astar_no_initial_path";
+            stopDetails = sprintf('A* failed to find an initial path from PF estimate to target %d.', targetIdx);
+            warning('%s Stopping.', stopDetails);
             break;
         else
             warning('A* replanning failed at target %d. Continuing on previous path.', targetIdx);
@@ -624,6 +636,8 @@ if ~isempty(fig) && isvalid(fig)
 end
 
 result.finalPoseEstimate = state.poseEstimate;
+result.stopReason = stopReason;
+result.stopDetails = stopDetails;
 result.wallBeliefs = wallBeliefs;
 result.activePlotData = activePlotData;
 dataStore.visitedWaypoints = result.visitedWaypoints;
@@ -633,9 +647,9 @@ dataStore.activeNavMap = navMap;
     localSaveCompetitionOutput(baseDir, result, dataStore, mapStruct, plannedWaypoints);
 
 if result.reachedAll
-    fprintf('Completed all %d final-competition targets.\n', size(plannedWaypoints, 1));
+    fprintf('%s\n', result.stopDetails);
 else
-    fprintf('Stopped before completing all final-competition targets.\n');
+    fprintf('Stopped before completing all final-competition targets: %s\n', result.stopDetails);
 end
 fprintf('Final PF estimate: [x=%.3f, y=%.3f, th=%.3f]\n', ...
     result.finalPoseEstimate(1), result.finalPoseEstimate(2), result.finalPoseEstimate(3));
@@ -1010,6 +1024,8 @@ outputData.beaconData = dataStore.beacon;
 outputData.visitedWaypoints = result.visitedWaypoints;
 outputData.wallBeliefs = result.wallBeliefs;
 outputData.activeNavMap = dataStore.activeNavMap;
+outputData.stopReason = result.stopReason;
+outputData.stopDetails = result.stopDetails;
 outputData.dataStore = dataStore;
 outputData.result = result;
 outputData.mapStruct = mapStruct;
@@ -1088,6 +1104,7 @@ end
 
 for i = 1:size(optWalls, 1)
     color = 'r';
+    lineStyle = '-';
     shouldPlot = true;
     if ~isempty(wallBeliefs) && numel(wallBeliefs) >= i
         if isstruct(wallBeliefs)
@@ -1107,13 +1124,14 @@ for i = 1:size(optWalls, 1)
         if strcmp(status, 'present') || probPresent >= 0.7
             color = 'k';
         elseif strcmp(status, 'absent') || probPresent <= 0.3
-            shouldPlot = false;
+            color = 'k';
+            lineStyle = '--';
         end
     end
 
     if shouldPlot
         plot(ax, [optWalls(i, 1), optWalls(i, 3)], [optWalls(i, 2), optWalls(i, 4)], ...
-            '-', 'Color', color, 'LineWidth', 1.5);
+            lineStyle, 'Color', color, 'LineWidth', 1.5);
     end
 end
 end

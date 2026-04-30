@@ -20,6 +20,9 @@ for k = 1:min(length(zDepth), length(angles))
     if wallIdx == 0
         continue;
     end
+    if opts.lockConfirmedWalls && ~strcmp(wallBeliefs(wallIdx).status, 'unknown')
+        continue;
+    end
 
     z = zDepth(k);
     if ~isfinite(z) || z <= 0 || dOpt(k) > opts.maxReliableRange
@@ -83,6 +86,9 @@ if ~isfield(opts, 'absentThreshold')
 end
 if ~isfield(opts, 'maxLogOdds')
     opts.maxLogOdds = 6.0;
+end
+if ~isfield(opts, 'lockConfirmedWalls')
+    opts.lockConfirmedWalls = true;
 end
 end
 

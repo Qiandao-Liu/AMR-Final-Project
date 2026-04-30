@@ -26,6 +26,10 @@ wallBeliefs = initWallBeliefs(optWalls);
     pose, 3.0, knownMap, optWalls, wallBeliefs, sensorOrigin, angles, opts);
 assert(changed);
 assert(strcmp(wallBeliefs(1).status, 'absent'));
+[wallBeliefs, changed] = updateWallBeliefs( ...
+    pose, 1.0, knownMap, optWalls, wallBeliefs, sensorOrigin, angles, opts);
+assert(~changed);
+assert(strcmp(wallBeliefs(1).status, 'absent'));
 
 occludingKnown = [1.5, -0.5, 1.5, 0.5];
 wallBeliefs = initWallBeliefs(optWalls);
